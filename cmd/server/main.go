@@ -48,6 +48,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
+	// Generate the canonical state-root chain before serving, so a replica can be
+	// checked against it from the first event of the first session.
+	if err := registry.Prepare(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
 	// A viewer who closes the tab leaves a session running at one event per
 	// second forever, so idle ones are reclaimed on a timer.
 	go reclaim(ctx, registry, *idle, *maxAge)

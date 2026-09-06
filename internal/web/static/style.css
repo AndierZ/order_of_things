@@ -45,15 +45,13 @@ button.primary { background: var(--accent); color: #fff; }
   padding: 72px 24px;
   text-align: center;
 }
-.welcome h1 { font-size: 52px; line-height: 1.05; margin-bottom: 14px; }
+.welcome h1 { font-size: 52px; line-height: 1.05; margin-bottom: 10px; }
 .welcome p { color: var(--muted); font-size: 17px; }
 .welcome .cast { display: flex; justify-content: center; gap: 14px; margin: 34px 0; }
 .welcome .cast svg { width: 74px; height: 74px; }
-.welcome .seed { margin-top: 26px; font-size: 13px; color: var(--muted); }
-.welcome .seed input {
-  font: inherit; width: 130px; padding: 5px 8px; margin-left: 6px;
-  border: 2px solid var(--line); border-radius: 7px; background: var(--panel);
-}
+.welcome .lede { font-size: 20px; font-weight: 700; color: var(--ink); margin-bottom: 0; }
+.welcome p + p { margin-top: 14px; }
+.welcome button { margin-top: 12px; }
 
 /* ------------------------------------------------------------------- game */
 

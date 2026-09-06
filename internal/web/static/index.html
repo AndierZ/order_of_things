@@ -10,23 +10,22 @@
 
 <section class="welcome">
   <h1>The Order of Things</h1>
-  <p>Four strategies play a repeated game. Each one needs a different amount of
-     the world to make up its mind &mdash; and that, exactly, is how much
-     coordination it costs to run.</p>
+  <p class="lede">A distributed system you are invited to break.</p>
   <div class="cast" id="cast"></div>
+  <p>Four players, nine components, every one on its own goroutine. Kill a replica
+     mid&#8209;game. Restart it. Bring one back subtly corrupted. The tournament
+     still ends exactly the same way &mdash; and the corrupted one never gets back in.</p>
+  <p>That is not luck, and it is not a fixed random seed. It is that every
+     component is a state machine fed one ordered log, so any of them can rebuild
+     the past by replaying it &mdash; and one that rebuilds it <em>wrong</em> can be
+     caught before it is trusted again. Replay as a debugger.</p>
   <button class="primary" id="play">Play</button>
-  <div class="seed">
-    <label>same tournament every time &mdash; seed
-      <input id="seed" type="text" inputmode="numeric" placeholder="random">
-    </label>
-  </div>
 </section>
 
 <main class="game">
   <div class="topbar">
     <h1>The Order of Things</h1>
     <div class="meta">
-      seed <span id="metaSeed">&mdash;</span> &middot;
       game <span id="metaGame">0</span>/<span id="metaGames">0</span> &middot;
       state root <span id="metaHash">&mdash;</span>
     </div>

@@ -3,12 +3,25 @@ package session
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"sync"
 	"time"
 
 	"order_of_things/internal/golden"
 )
+
+// CanonicalSeed fixes which tournament everyone plays.
+//
+// It is not the point and it is deliberately not a knob. A seeded generator
+// producing the same sequence twice is a property of the generator, not of this
+// system, and offering it as a control invites the reader to think that is what
+// is being demonstrated. What is being demonstrated is that the outcome holds
+// while you are actively breaking the thing -- killing replicas mid-game,
+// restarting them, letting a corrupted one try to rejoin -- with every component
+// on its own goroutine and no coordination beyond the order of the log.
+//
+// Fixing it also buys something concrete: one canonical state-root chain,
+// generated once, that every session can check a recovering replica against.
+const CanonicalSeed = 20260906
 
 // DefaultGames is how many games a session plays. Fixed rather than unbounded so
 // that a canonical reference for the whole run can be generated up front, which
@@ -29,10 +42,8 @@ type Registry struct {
 	golden   *golden.Store
 	games    int
 	interval time.Duration
-	// now and newSeed are injectable so tests do not depend on the clock or on
-	// what a random number generator happens to produce.
-	now     func() time.Time
-	newSeed func() int64
+	// now is injectable so tests do not depend on the clock.
+	now func() time.Time
 
 	mu       sync.Mutex
 	sessions map[string]*entry
@@ -52,22 +63,25 @@ type entry struct {
 // NewRegistry returns a registry recording references in store, which may be an
 // in-memory store.
 func NewRegistry(store *golden.Store) *Registry {
-	seeds := rand.New(rand.NewSource(time.Now().UnixNano()))
-	var seedMu sync.Mutex
 	return &Registry{
-		golden: store,
-		games:  DefaultGames,
-		now:    time.Now,
-		newSeed: func() int64 {
-			// The registry's own seed generator is the one place real entropy
-			// enters, and it never reaches a state machine: it only chooses which
-			// deterministic tournament to run.
-			seedMu.Lock()
-			defer seedMu.Unlock()
-			return seeds.Int63n(1 << 32)
-		},
+		golden:   store,
+		games:    DefaultGames,
+		interval: DefaultInterval,
+		now:      time.Now,
 		sessions: make(map[string]*entry),
 	}
+}
+
+// Prepare generates the canonical state-root chain up front, so the first session
+// does not pay for it and every session -- including one whose replicas are being
+// restarted seconds after it starts -- has something to check a recovering
+// replica against from its very first event.
+func (r *Registry) Prepare(ctx context.Context) error {
+	r.mu.Lock()
+	games := r.games
+	r.mu.Unlock()
+	_, err := r.reference(ctx, CanonicalSeed, games)
+	return err
 }
 
 // SetGames overrides how many games new sessions play. A real server wants the
@@ -94,18 +108,15 @@ type Handle struct {
 	Session *Session
 }
 
-// Create starts a new session. A seed of 0 picks one; passing a seed that has
-// been played before reproduces that tournament exactly, which is the whole
-// point of the system being deterministic.
+// Create starts a new session. A seed of 0 plays the canonical tournament, which
+// is what a server always wants; passing one explicitly is for tests that need
+// two different tournaments.
 //
-// Before the visible session starts, the same tournament is run headlessly at
-// full speed to establish its canonical state-root chain. That takes a few
-// milliseconds for a hundred games and means every session -- whatever seed it
-// drew -- has a reference to check a restarting replica against, rather than only
-// the seeds someone remembered to pre-generate.
+// If the canonical chain has not been generated yet, it is generated here. Call
+// Prepare at startup to get that out of the way.
 func (r *Registry) Create(ctx context.Context, seed int64) (*Handle, error) {
 	if seed == 0 {
-		seed = r.newSeed()
+		seed = CanonicalSeed
 	}
 	r.mu.Lock()
 	games, interval := r.games, r.interval

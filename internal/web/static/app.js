@@ -31,17 +31,10 @@ const state = {
 $("cast").innerHTML = STRATEGIES.map(s => characterSvg(s, "awake")).join("");
 
 $("play").addEventListener("click", async () => {
-  const raw = $("seed").value.trim();
-  const seed = /^\d+$/.test(raw) ? Number(raw) : 0;
-
   $("play").disabled = true;
-  $("play").textContent = "Building the reference run…";
+  $("play").textContent = "Starting…";
   try {
-    const res = await fetch("/api/sessions", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ seed }),
-    });
+    const res = await fetch("/api/sessions", { method: "POST" });
     if (!res.ok) throw new Error(await res.text());
     start(await res.json());
   } catch (err) {
@@ -56,7 +49,6 @@ function start(session) {
   state.seed = session.seed;
   state.games = session.games;
 
-  $("metaSeed").textContent = session.seed;
   $("metaGames").textContent = session.games;
   document.body.classList.add("playing");
 
@@ -313,7 +305,7 @@ function paintStatus() {
   $("step").disabled = s.done;
 
   if (s.done) {
-    banner(`Tournament complete — ${s.completed} games, state root ${s.stateHash}. Same seed, same result, every time.`, true);
+    banner(`Tournament complete — ${s.completed} games, state root ${s.stateHash}. Same result, whatever you did to it.`, true);
   } else if (s.stalled) {
     banner(`Stalled: no live replica of ${s.waitingOn}. Nothing can happen until one comes back — restart either half.`, false);
   } else {

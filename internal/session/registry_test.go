@@ -86,23 +86,44 @@ func TestRegistryReproducesASeed(t *testing.T) {
 	}
 }
 
-func TestRegistryPicksASeedWhenNotGiven(t *testing.T) {
+// Everyone plays the same tournament. The seed is fixed on purpose: what this
+// system demonstrates is that the outcome holds while the viewer is breaking it,
+// not that a seeded generator repeats itself.
+func TestSessionsPlayTheCanonicalTournament(t *testing.T) {
 	r, _ := registry(t, 10)
 	ctx := context.Background()
 
-	seeds := make(map[int64]bool)
 	for i := 0; i < 5; i++ {
 		handle, err := r.Create(ctx, 0)
 		if err != nil {
 			t.Fatalf("create: %v", err)
 		}
-		if handle.Seed == 0 {
-			t.Fatal("session was created with seed 0")
+		if handle.Seed != session.CanonicalSeed {
+			t.Fatalf("session %d drew seed %d, want the canonical %d",
+				i, handle.Seed, session.CanonicalSeed)
 		}
-		seeds[handle.Seed] = true
 	}
-	if len(seeds) < 2 {
-		t.Errorf("five sessions drew %d distinct seeds", len(seeds))
+}
+
+// Prepare makes the canonical chain available before any session exists, so a
+// replica restarted in the first seconds of the first session still has
+// something to be checked against.
+func TestPrepareGeneratesTheCanonicalChainUpFront(t *testing.T) {
+	r, store := registry(t, 10)
+
+	if store.Validator(session.CanonicalSeed, 10) != nil {
+		t.Fatal("a chain existed before Prepare")
+	}
+	if err := r.Prepare(context.Background()); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	validator := store.Validator(session.CanonicalSeed, 10)
+	if validator == nil {
+		t.Fatal("no canonical chain after Prepare")
+	}
+	recorded, _ := store.Get(session.CanonicalSeed, 10)
+	if want := 10 * 3; len(recorded.Chain) != want {
+		t.Errorf("chain has %d roots, want %d", len(recorded.Chain), want)
 	}
 }
 

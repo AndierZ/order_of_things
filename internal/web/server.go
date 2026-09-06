@@ -1,5 +1,11 @@
 // Package web serves the tournament to a browser.
 //
+// Everyone plays the same tournament: the seed is fixed and is not exposed as a
+// control. Reproducing a seeded sequence is a property of the generator, not of
+// this system, and offering it as a knob would point the reader at the wrong
+// claim. The claim is that the outcome survives what the viewer does to the
+// system while it runs.
+//
 // The one thing this layer will not do is hand the browser a rendered view of
 // the world and let it poll for a new one. Everything the page draws, it draws by
 // folding an ordered feed of events, exactly as every component inside the system
@@ -69,10 +75,6 @@ func (s *Server) index(static fs.FS) http.HandlerFunc {
 	}
 }
 
-type createRequest struct {
-	Seed int64 `json:"seed"`
-}
-
 type sessionResponse struct {
 	Id    string `json:"id"`
 	Seed  int64  `json:"seed"`
@@ -80,15 +82,8 @@ type sessionResponse struct {
 }
 
 func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
-	var req createRequest
-	if r.ContentLength > 0 {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "bad request body", http.StatusBadRequest)
-			return
-		}
-	}
-
-	handle, err := s.registry.Create(r.Context(), req.Seed)
+	// No seed: every session is the canonical tournament.
+	handle, err := s.registry.Create(r.Context(), 0)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

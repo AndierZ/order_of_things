@@ -31,9 +31,9 @@ func newTestServer(t *testing.T) *httptest.Server {
 	return server
 }
 
-func createSession(t *testing.T, server *httptest.Server, body string) sessionResponse {
+func createSession(t *testing.T, server *httptest.Server) sessionResponse {
 	t.Helper()
-	res, err := server.Client().Post(server.URL+"/api/sessions", "application/json", strings.NewReader(body))
+	res, err := server.Client().Post(server.URL+"/api/sessions", "application/json", nil)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -168,23 +168,39 @@ func TestStaticAssetsAreServed(t *testing.T) {
 	}
 }
 
-func TestCreateSessionAssignsASeed(t *testing.T) {
+// Every session is the same tournament. The seed is not a control: reproducing a
+// seeded sequence is a property of the generator, not of this system, and the
+// claim being made is about surviving what the viewer does to a running system.
+func TestEverySessionPlaysTheCanonicalTournament(t *testing.T) {
 	server := newTestServer(t)
 
-	drawn := createSession(t, server, `{}`)
-	if drawn.Seed == 0 || drawn.Id == "" {
-		t.Errorf("created %+v, want an id and a drawn seed", drawn)
+	first := createSession(t, server)
+	second := createSession(t, server)
+
+	if first.Seed != session.CanonicalSeed || second.Seed != session.CanonicalSeed {
+		t.Errorf("seeds were %d and %d, want the canonical %d",
+			first.Seed, second.Seed, session.CanonicalSeed)
 	}
-	if drawn.Games != 6 {
-		t.Errorf("games = %d, want 6", drawn.Games)
+	if first.Id == second.Id {
+		t.Error("two sessions were given the same id")
+	}
+	if first.Games != 6 {
+		t.Errorf("games = %d, want 6", first.Games)
 	}
 
-	asked := createSession(t, server, `{"seed":1234}`)
-	if asked.Seed != 1234 {
-		t.Errorf("seed = %d, want 1234", asked.Seed)
+	// A seed in the request body is not a control and must not become one.
+	res, err := server.Client().Post(server.URL+"/api/sessions", "application/json",
+		strings.NewReader(`{"seed":999}`))
+	if err != nil {
+		t.Fatalf("create: %v", err)
 	}
-	if asked.Id == drawn.Id {
-		t.Error("two sessions were given the same id")
+	defer res.Body.Close()
+	var third sessionResponse
+	if err := json.NewDecoder(res.Body).Decode(&third); err != nil {
+		t.Fatalf("decoding: %v", err)
+	}
+	if third.Seed != session.CanonicalSeed {
+		t.Errorf("a seed in the body was honoured: got %d, want %d", third.Seed, session.CanonicalSeed)
 	}
 }
 
@@ -192,7 +208,7 @@ func TestCreateSessionAssignsASeed(t *testing.T) {
 // with contiguous indices, and carry everything needed to draw a game through.
 func TestStreamDeliversTheFeedInOrder(t *testing.T) {
 	server := newTestServer(t)
-	created := createSession(t, server, `{"seed":42}`)
+	created := createSession(t, server)
 	post(t, server, "/api/sessions/"+created.Id+"/control", `{"action":"start"}`).Body.Close()
 
 	frames := readFrames(t, server, "/api/sessions/"+created.Id+"/stream", func(f []frame) bool {
@@ -238,7 +254,7 @@ func TestStreamDeliversTheFeedInOrder(t *testing.T) {
 // restarting replica resumes from the log.
 func TestStreamResumesFromAnIndex(t *testing.T) {
 	server := newTestServer(t)
-	created := createSession(t, server, `{"seed":42}`)
+	created := createSession(t, server)
 	post(t, server, "/api/sessions/"+created.Id+"/control", `{"action":"start"}`).Body.Close()
 
 	full := feedEvents(readFrames(t, server, "/api/sessions/"+created.Id+"/stream", func(f []frame) bool {
@@ -261,7 +277,7 @@ func TestStreamResumesFromAnIndex(t *testing.T) {
 // separate kind of frame, never folded into the feed.
 func TestStatusFrameCarriesEveryReplica(t *testing.T) {
 	server := newTestServer(t)
-	created := createSession(t, server, `{"seed":42}`)
+	created := createSession(t, server)
 
 	frames := readFrames(t, server, "/api/sessions/"+created.Id+"/stream", func(f []frame) bool {
 		return lastStatus(f) != nil
@@ -276,8 +292,8 @@ func TestStatusFrameCarriesEveryReplica(t *testing.T) {
 	if want := 4*2 + 2 + 1; len(replicas) != want {
 		t.Errorf("status listed %d replicas, want %d", len(replicas), want)
 	}
-	if status["seed"].(float64) != 42 {
-		t.Errorf("status seed = %v, want 42", status["seed"])
+	if int64(status["seed"].(float64)) != session.CanonicalSeed {
+		t.Errorf("status seed = %v, want the canonical %d", status["seed"], session.CanonicalSeed)
 	}
 	if status["games"].(float64) != 6 {
 		t.Errorf("status games = %v, want 6", status["games"])
@@ -289,7 +305,7 @@ func TestStatusFrameCarriesEveryReplica(t *testing.T) {
 
 func TestKillAndRestartAReplica(t *testing.T) {
 	server := newTestServer(t)
-	created := createSession(t, server, `{"seed":42}`)
+	created := createSession(t, server)
 	path := "/api/sessions/" + created.Id + "/replicas/flipper/r1"
 
 	res := post(t, server, path, `{"action":"kill"}`)
@@ -326,7 +342,7 @@ func TestKillAndRestartAReplica(t *testing.T) {
 // pretending it worked.
 func TestRefusedActionsReportWhy(t *testing.T) {
 	server := newTestServer(t)
-	created := createSession(t, server, `{"seed":42}`)
+	created := createSession(t, server)
 
 	// A session waits for Play, so it is still holding at its first event here.
 	// Restarting something that is already running is refused.
@@ -348,7 +364,7 @@ func TestRefusedActionsReportWhy(t *testing.T) {
 // control that silently did nothing would be worse than one that says so.
 func TestControlsAreRefusedOnceFinished(t *testing.T) {
 	server := newTestServer(t)
-	created := createSession(t, server, `{"seed":42}`)
+	created := createSession(t, server)
 	post(t, server, "/api/sessions/"+created.Id+"/control", `{"action":"start"}`).Body.Close()
 
 	readFrames(t, server, "/api/sessions/"+created.Id+"/stream", func(f []frame) bool {
@@ -371,7 +387,7 @@ func TestControlsAreRefusedOnceFinished(t *testing.T) {
 
 func TestBadRequestsAreRejected(t *testing.T) {
 	server := newTestServer(t)
-	created := createSession(t, server, `{"seed":42}`)
+	created := createSession(t, server)
 
 	tests := []struct {
 		name string
@@ -407,7 +423,7 @@ func TestBadRequestsAreRejected(t *testing.T) {
 
 func TestPauseHoldsTheStream(t *testing.T) {
 	server := newTestServer(t)
-	created := createSession(t, server, `{"seed":42}`)
+	created := createSession(t, server)
 	post(t, server, "/api/sessions/"+created.Id+"/control", `{"action":"pause"}`).Body.Close()
 
 	frames := readFrames(t, server, "/api/sessions/"+created.Id+"/stream", func(f []frame) bool {
@@ -429,7 +445,7 @@ func TestPauseHoldsTheStream(t *testing.T) {
 
 func TestDeleteSession(t *testing.T) {
 	server := newTestServer(t)
-	created := createSession(t, server, `{"seed":42}`)
+	created := createSession(t, server)
 
 	req, _ := http.NewRequest(http.MethodDelete, server.URL+"/api/sessions/"+created.Id, nil)
 	res, err := server.Client().Do(req)

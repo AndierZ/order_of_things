@@ -36,6 +36,13 @@ func (e *RehearsalError) Error() string {
 // would ever show up has to show up here, where the candidate is talking to
 // nobody and can be refused for free.
 //
+// Two limits, neither of which this closes. It only asks the questions the
+// recorded history happens to ask: a defect on a path the canonical tournament
+// never takes is not caught late, it is not caught at all, which is the ordinary
+// limit of replay testing everywhere. And an intermittent defect can answer all
+// of them correctly by luck. This is a guardrail that makes a class of broken
+// replicas impossible to admit; it is not a proof that an admitted one is right.
+//
 // Worth being honest about what this needs, because it is not a live mechanism.
 // A latent decision bug cannot be caught at rejoin time by any means -- it has
 // not happened yet -- so the only way to catch it is to ask a question whose

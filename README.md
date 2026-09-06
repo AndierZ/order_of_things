@@ -183,6 +183,50 @@ CLI, because it is the honest illustration of the limit — and because a defect
 that is invisible on the developer's laptop and reliable in production is not a
 contrived example. It is the normal shape of the worst bugs there are.
 
+### Where the guardrail ends
+
+The previous section is about a fault that is *sometimes* wrong. There is a
+plainer limit that applies even to one that is *always* wrong: **rehearsal only
+asks the questions the recorded history happens to ask.**
+
+A candidate is made to replay the canonical tournament — twenty-five games,
+seventy-five events. That is not every state four strategies can reach. A defect
+sitting on a path the canonical run never takes is not caught late or caught
+probabilistically; it is not caught at all, because nothing in the recording
+exercises it. This is not special to this project. It is the ordinary limit of
+replay and regression testing everywhere: **they test what you recorded.**
+
+So rehearsal is a guardrail, not a proof. It raises the cost of shipping a broken
+replica and makes a whole class of them impossible to sneak in. It does not make
+a correct system.
+
+Which means divergence still happens in production, and the honest question is
+what the system does then. It does the only thing available to it: quarantine one
+half, so that a single unambiguous line of events survives.
+
+That is worth something real, and it is worth being precise about what. It buys
+**consistency**, not correctness. Afterwards there is exactly one history to
+reason about rather than a fork — one log, one order, one state at every point,
+and no argument about which timeline is the real one. What it emphatically does
+not buy is any assurance that the surviving log is the *right* one. The replica
+that won the race may be the broken one, and the events it committed are already
+committed.
+
+Deciding which side was right, and what to do about what has already been
+written, is reconciliation, and in every real system that ends in a person
+looking at it. There is no mechanism here — or, as far as I know, anywhere — that
+does it unaided. The design doc names this and declines to solve it, and so does
+this build.
+
+That is less defeatist than it sounds, and it is the reason the rest of the
+machinery is worth having. Manual reconciliation is *tractable* against a single
+ordered log that replays deterministically from any point with a state root at
+every step: you can find where it went wrong, replay both sides of it, and see
+exactly what diverged. It is close to hopeless against a distributed system where
+the interleaving is gone and every node has a slightly different story. The
+mechanisms in this project do not remove the human from the loop. They make the
+loop something a human can actually close.
+
 ## The coordination table
 
 The four strategies are not decoration. Each needs a different amount of the

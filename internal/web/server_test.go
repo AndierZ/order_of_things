@@ -139,10 +139,21 @@ func TestIndexIsServed(t *testing.T) {
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("GET / returned %d", res.StatusCode)
 	}
-	for _, want := range []string{"The Order of Things", "ncase.me/trust", "/static/app.js"} {
+	// Credit is on the welcome page, which is the first and sometimes only thing
+	// a visitor reads, not tucked into a footer they reach by playing.
+	for _, want := range []string{
+		"The Order of Things", "/static/app.js",
+		"ncase.me/trust", "The Evolution of Trust",
+		"suno.com/s/yjNvZutbRTCvK0ko",
+	} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("index does not mention %q", want)
 		}
+	}
+	// And it must appear before the Play button, not only in the game view.
+	welcome := string(body)[:strings.Index(string(body), `<main class="game">`)]
+	if !strings.Contains(welcome, "ncase.me/trust") {
+		t.Error("the Nicky Case credit is not on the welcome page")
 	}
 }
 

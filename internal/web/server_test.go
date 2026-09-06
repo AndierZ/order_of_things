@@ -314,6 +314,23 @@ func TestStatusFrameCarriesEveryReplica(t *testing.T) {
 	}
 }
 
+// Restart and the bugged restart both act on a live replica directly: the
+// operator should not have to kill it first to redeploy it.
+func TestRestartActsOnALiveReplica(t *testing.T) {
+	server := newTestServer(t)
+	created := createSession(t, server)
+	path := "/api/sessions/" + created.Id + "/replicas/flipper/r1"
+
+	for _, action := range []string{`{"action":"restart"}`, `{"action":"restart-with-bug","defect":"clock"}`} {
+		res := post(t, server, path, action)
+		body, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		if res.StatusCode != http.StatusNoContent {
+			t.Errorf("%s on a live replica returned %d: %s", action, res.StatusCode, body)
+		}
+	}
+}
+
 func TestKillAndRestartAReplica(t *testing.T) {
 	server := newTestServer(t)
 	created := createSession(t, server)
@@ -355,18 +372,19 @@ func TestRefusedActionsReportWhy(t *testing.T) {
 	server := newTestServer(t)
 	created := createSession(t, server)
 
-	// A session waits for Play, so it is still holding at its first event here.
-	// Restarting something that is already running is refused.
-	res := post(t, server, "/api/sessions/"+created.Id+"/replicas/flipper/r0", `{"action":"restart"}`)
+	// Killing something that is already stopped is refused, and says why.
+	post(t, server, "/api/sessions/"+created.Id+"/replicas/flipper/r0", `{"action":"kill"}`).Body.Close()
+
+	res := post(t, server, "/api/sessions/"+created.Id+"/replicas/flipper/r0", `{"action":"kill"}`)
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusConflict {
-		t.Fatalf("restarting a live replica returned %d, want 409", res.StatusCode)
+		t.Fatalf("killing a stopped replica returned %d, want 409", res.StatusCode)
 	}
 	var body map[string]string
 	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
 		t.Fatalf("decoding: %v", err)
 	}
-	if !strings.Contains(body["error"], "already running") {
+	if !strings.Contains(body["error"], "not running") {
 		t.Errorf("error was %q", body["error"])
 	}
 }

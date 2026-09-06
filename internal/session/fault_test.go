@@ -198,6 +198,98 @@ func TestQuarantinedReplicaCanBeRedeployedClean(t *testing.T) {
 	}
 }
 
+// A restart is a redeploy of that replica: it stops whatever is running and
+// brings back a fresh instance. Making the operator kill it first is bookkeeping
+// the supervisor is better placed to do.
+func TestRestartingARunningReplicaRedeploysIt(t *testing.T) {
+	s, _ := started(t, session.Config{Seed: 42, Games: 80, Replicas: 2})
+
+	waitFor(t, "the tournament to get going", func() bool {
+		return s.Tracker().Snapshot().Completed >= 10
+	})
+
+	// No kill first, in either case.
+	if err := s.Restart("flipper", "r1"); err != nil {
+		t.Fatalf("restarting a live replica: %v", err)
+	}
+	if got := status(t, s, "flipper", "r1"); !got.Running || got.Killed || got.Quarantined {
+		t.Errorf("after a clean redeploy: %+v, want running and clear", got)
+	}
+
+	if err := s.RestartWithBug("flipper", "r1", session.Defect{ImpureClock: true}); err != nil {
+		t.Fatalf("bugging a live replica: %v", err)
+	}
+	waitFor(t, "the defective replica to be refused", func() bool {
+		return status(t, s, "flipper", "r1").Quarantined
+	})
+
+	result := s.Wait()
+	if result.Games != 80 {
+		t.Errorf("completed %d of 80 games", result.Games)
+	}
+}
+
+// The edge case worth naming: lose one half to a kill and the other to a defect,
+// and the player has nobody left to answer for it. The tournament comes to rest
+// rather than doing anything clever, and stays there until a replica returns.
+// This is the most direct demonstration of why there are two of everything.
+func TestKillingOneHalfAndBuggingTheOtherStallsTheTournament(t *testing.T) {
+	s, _ := started(t, session.Config{
+		Seed: 42, Games: 80, Replicas: 2, Reference: reference(t, 42, 80),
+	})
+
+	waitFor(t, "the tournament to get going", func() bool {
+		return s.Tracker().Snapshot().Completed >= 8
+	})
+	if err := s.Kill("flipper", "r0"); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+	if err := s.RestartWithBug("flipper", "r1", session.Defect{ImpureClock: true}); err != nil {
+		t.Fatalf("bug: %v", err)
+	}
+
+	waitFor(t, "both halves of the flipper pair to be down", func() bool {
+		r0, r1 := status(t, s, "flipper", "r0"), status(t, s, "flipper", "r1")
+		return !r0.Live() && !r1.Live()
+	})
+	if got := status(t, s, "flipper", "r0"); !got.Killed {
+		t.Errorf("flipper/r0 = %+v, want killed", got)
+	}
+	if got := status(t, s, "flipper", "r1"); !got.Quarantined {
+		t.Errorf("flipper/r1 = %+v, want quarantined", got)
+	}
+
+	// The tournament runs on until it needs flipper, then comes to rest.
+	waitFor(t, "the tournament to come to rest on flipper", func() bool {
+		stalled, on := s.Stalled()
+		return stalled && on == "flipper" && restsAt(s, 20*time.Millisecond)
+	})
+	held := s.Tracker().Snapshot().Version
+	if !restsAt(s, 200*time.Millisecond) {
+		t.Errorf("advanced from version %d while stalled with no live flipper", held)
+	}
+	// Nothing else was harmed by it.
+	for _, st := range s.Status() {
+		if st.Component != "flipper" && (st.Quarantined || st.Killed) {
+			t.Errorf("%s/%s went down with the flipper pair", st.Component, st.Replica)
+		}
+	}
+
+	// Bringing either half back clean releases it.
+	if err := s.Restart("flipper", "r0"); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	waitFor(t, "the tournament to recover", func() bool {
+		stalled, _ := s.Stalled()
+		return !stalled && s.Tracker().Snapshot().Version > held
+	})
+
+	result := s.Wait()
+	if result.Games != 80 {
+		t.Errorf("completed %d of 80 games after recovering", result.Games)
+	}
+}
+
 // The tracker is a read model, not one half of an arbitrated pair, so it is not
 // a fault-injection target.
 func TestTrackerIsNotFaultInjectable(t *testing.T) {

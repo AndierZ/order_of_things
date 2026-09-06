@@ -12,12 +12,12 @@
   <h1>The Order of Things</h1>
   <p class="lede">A distributed system you are invited to break.</p>
   <div class="cast" id="cast"></div>
-  <p>Four players, nine components, every one on its own goroutine. Kill a replica
+  <p>Four players, nine components, everyone on its own goroutine. Kill a replica
      mid&#8209;game. Restart it. Bring one back subtly corrupted. The tournament
-     still ends exactly the same way &mdash; and the corrupted one never gets back in.</p>
-  <p>That is not luck, and it is not a fixed random seed. It is that every
-     component is a state machine fed one ordered log, so any of them can rebuild
-     the past by replaying it &mdash; and one that rebuilds it <em>wrong</em> can be
+     still ends exactly the same way.</p>
+  <p>That is not luck, and it is not about the fixed random seed. It is that every
+     component is a state machine fed one ordered log, so they all build the same
+     states over time &mdash; and one that builds it <em>wrong</em> on boot can be
      caught before it is trusted again. Replay as a debugger.</p>
   <button class="primary" id="play">Play</button>
 
@@ -25,8 +25,7 @@
     The game being played, its payoff matrix and the whole way of explaining it
     are borrowed from
     <a href="https://ncase.me/trust/" target="_blank" rel="noopener">Nicky
-    Case&rsquo;s <em>The Evolution of Trust</em></a>, which is worth your time
-    whether or not distributed systems are.
+    Case&rsquo;s <em>The Evolution of Trust</em></a>, which is worth exploring separately.
     <br>
     Music by Zian Xu, made with <a href="https://suno.com/s/yjNvZutbRTCvK0ko"
     target="_blank" rel="noopener">Suno</a>.

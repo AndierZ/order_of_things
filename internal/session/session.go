@@ -151,8 +151,13 @@ type Session struct {
 	sequencer *platform.Sequencer
 	tracker   *tracker.Tracker
 
-	pacer         *platform.Pacer
-	chain         []uint64
+	pacer *platform.Pacer
+	chain []uint64
+	// lifecycle serializes the operator actions -- kill, restart -- which have to
+	// release mu while they wait for a goroutine to stop. Without it two of them
+	// could interleave in that window and leave a slot running two instances.
+	lifecycle sync.Mutex
+
 	mu            sync.Mutex
 	slots         []*slot
 	ctx           context.Context
@@ -341,6 +346,10 @@ func (s *Session) shutdown() Result {
 	// those reads safe without putting a lock on the state itself.
 	s.cancel()
 
+	// Let any operator action already in flight finish rather than racing it.
+	s.lifecycle.Lock()
+	defer s.lifecycle.Unlock()
+
 	s.mu.Lock()
 	waits := make([]chan struct{}, 0, len(s.slots))
 	for _, sl := range s.slots {
@@ -397,6 +406,9 @@ func (s *Session) Run(ctx context.Context) Result {
 // OS process to signal in a single-process design, so "killing" means the replica
 // stops responding; its sibling carries the component alone.
 func (s *Session) Kill(component, id string) error {
+	s.lifecycle.Lock()
+	defer s.lifecycle.Unlock()
+
 	s.mu.Lock()
 	if s.finished {
 		s.mu.Unlock()
@@ -418,8 +430,8 @@ func (s *Session) Kill(component, id string) error {
 	cancel, done := sl.cancel, sl.done
 	s.mu.Unlock()
 
-	// Wait outside the lock: the watcher takes it on the way out, so holding it
-	// here would deadlock against the goroutine being waited on.
+	// Wait outside mu: the watcher takes it on the way out, so holding it here
+	// would deadlock against the goroutine being waited on.
 	cancel()
 	<-done
 
@@ -433,8 +445,9 @@ func (s *Session) Kill(component, id string) error {
 	return nil
 }
 
-// Restart brings a stopped replica back as a fresh instance with empty state. It
-// subscribes, replays the log from the sequencer, and rejoins its pair -- unless
+// Restart brings a replica back as a fresh instance with empty state, stopping
+// the one that is there if it is still up. It subscribes, replays the log from
+// the sequencer, and rejoins its pair -- unless
 // its replay disagrees with what the log records or with the canonical chain, in
 // which case it quarantines itself before it can affect anything.
 //
@@ -448,28 +461,47 @@ func (s *Session) Restart(component, id string) error {
 	return s.restart(component, id, Defect{})
 }
 
-// RestartWithBug brings a killed replica back defective. Both defects are caught
-// during replay, by different mechanisms, and neither replica rejoins.
+// RestartWithBug brings a replica back defective, stopping the one that is there
+// if it is still up. Both defects are caught during replay, by different
+// mechanisms, and neither gets to rejoin.
 func (s *Session) RestartWithBug(component, id string, defect Defect) error {
 	return s.restart(component, id, defect)
 }
 
 func (s *Session) restart(component, id string, defect Defect) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.lifecycle.Lock()
+	defer s.lifecycle.Unlock()
 
+	s.mu.Lock()
 	if s.finished {
+		s.mu.Unlock()
 		return errFinished
 	}
 	sl, err := s.findLocked(component, id)
 	if err != nil {
+		s.mu.Unlock()
 		return err
 	}
 	if !sl.restartable {
+		s.mu.Unlock()
 		return fmt.Errorf("session: %s is not fault-injectable", sl)
 	}
-	if sl.running {
-		return fmt.Errorf("session: %s is already running", sl)
+	cancel, done, running := sl.cancel, sl.done, sl.running
+	s.mu.Unlock()
+
+	// Restarting something still up means stopping it first. A restart is a
+	// redeploy of that replica, not a second instance of it, and refusing until
+	// the caller has killed it themselves makes the operator do bookkeeping the
+	// supervisor is better placed to do.
+	if running {
+		cancel()
+		<-done
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.finished {
+		return errFinished
 	}
 	sl.defect = defect
 	s.startLocked(sl)

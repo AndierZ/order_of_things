@@ -1,0 +1,197 @@
+:root {
+  --ink: #241f31;
+  --paper: #fdf6e3;
+  --panel: #fffdf7;
+  --line: #e0d7c2;
+  --muted: #7d7387;
+  --accent: #d96f4f;
+  --good: #3f9e5a;
+  --bad: #c1503c;
+  --shadow: 0 2px 0 var(--line);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 15px/1.5 "Trebuchet MS", "Segoe UI", system-ui, sans-serif;
+}
+
+h1, h2, h3 { font-weight: 800; letter-spacing: -0.01em; margin: 0; }
+
+button {
+  font: inherit;
+  font-weight: 700;
+  color: var(--ink);
+  background: var(--panel);
+  border: 2.5px solid var(--ink);
+  border-radius: 9px;
+  padding: 7px 14px;
+  cursor: pointer;
+  box-shadow: 0 3px 0 var(--ink);
+}
+button:hover:not(:disabled) { transform: translateY(1px); box-shadow: 0 2px 0 var(--ink); }
+button:active:not(:disabled) { transform: translateY(3px); box-shadow: none; }
+button:disabled { opacity: 0.35; cursor: not-allowed; box-shadow: 0 3px 0 var(--line); }
+button.primary { background: var(--accent); color: #fff; }
+
+/* ---------------------------------------------------------------- welcome */
+
+.welcome {
+  max-width: 620px;
+  margin: 0 auto;
+  padding: 72px 24px;
+  text-align: center;
+}
+.welcome h1 { font-size: 52px; line-height: 1.05; margin-bottom: 14px; }
+.welcome p { color: var(--muted); font-size: 17px; }
+.welcome .cast { display: flex; justify-content: center; gap: 14px; margin: 34px 0; }
+.welcome .cast svg { width: 74px; height: 74px; }
+.welcome .seed { margin-top: 26px; font-size: 13px; color: var(--muted); }
+.welcome .seed input {
+  font: inherit; width: 130px; padding: 5px 8px; margin-left: 6px;
+  border: 2px solid var(--line); border-radius: 7px; background: var(--panel);
+}
+
+/* ------------------------------------------------------------------- game */
+
+.game { display: none; padding: 14px 22px 34px; max-width: 1220px; margin: 0 auto; }
+body.playing .game { display: block; }
+body.playing .welcome { display: none; }
+
+.topbar {
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  padding-bottom: 14px; margin-bottom: 18px; border-bottom: 2.5px solid var(--ink);
+}
+.topbar h1 { font-size: 24px; }
+.topbar .meta { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.topbar .controls { margin-left: auto; display: flex; gap: 8px; }
+
+.banner {
+  display: none; margin-bottom: 16px; padding: 10px 14px;
+  border: 2.5px solid var(--ink); border-radius: 10px;
+  background: #ffe9c9; font-weight: 700;
+}
+.banner.show { display: block; }
+.banner.done { background: #d9f2df; }
+
+.layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr); gap: 20px; }
+@media (max-width: 980px) { .layout { grid-template-columns: 1fr; } }
+
+.panel {
+  background: var(--panel);
+  border: 2.5px solid var(--ink);
+  border-radius: 14px;
+  padding: 12px 14px;
+  margin-bottom: 16px;
+}
+.panel > h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 12px; }
+
+/* ---------------------------------------------------------------- machine */
+
+/* The diagram makes one claim: everything hangs off a single gate. A sequencer at
+   the top, one bus, and every component -- injector, both halves of all four
+   players, tracker -- dropping onto it. Nothing talks to anything else. */
+
+.machine-panel { padding-bottom: 8px; }
+.hub { display: flex; justify-content: center; }
+
+.sequencer {
+  text-align: center; padding: 8px 22px;
+  border: 3px solid var(--ink); border-radius: 13px; background: #efe7fb;
+  box-shadow: var(--shadow); min-width: 150px;
+}
+.sequencer .title { font-weight: 800; font-size: 13px; }
+.sequencer .sub { font-size: 10.5px; color: var(--muted); }
+.sequencer .seq { font-size: 26px; font-weight: 800; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.sequencer .pulse { height: 5px; border-radius: 3px; background: var(--line); margin-top: 7px; transition: background 120ms; }
+.sequencer.tick .pulse { background: var(--accent); }
+
+.drop { width: 3px; height: 14px; background: var(--ink); margin: 0 auto; }
+.bus { height: 3px; background: var(--ink); border-radius: 2px; }
+
+.nodes {
+  display: grid;
+  grid-template-columns: minmax(96px, 0.62fr) repeat(4, minmax(0, 1fr)) minmax(96px, 0.62fr);
+  gap: 8px;
+  align-items: start;
+}
+.node { position: relative; padding-top: 15px; }
+/* The stub that ties each component to the bus. */
+.node::before {
+  content: ""; position: absolute; top: 0; left: 50%; margin-left: -1.5px;
+  width: 3px; height: 15px; background: var(--ink);
+}
+
+.node .box {
+  border: 2.5px dashed var(--ink); border-radius: 11px;
+  padding: 10px 8px; background: #fff; text-align: center;
+}
+.node .box .name { font-weight: 800; font-size: 12px; }
+.node .box .sub { font-size: 10px; color: var(--muted); line-height: 1.25; }
+
+/* A player is one box with two replicas inside it: four players, not eight. */
+.pair { border: 2.5px solid var(--ink); border-radius: 12px; background: #fff; overflow: hidden; }
+.pair-head {
+  padding: 4px 6px 3px; text-align: center;
+  border-bottom: 2px solid var(--line); background: #faf6ef;
+}
+.pair-head .name { font-weight: 800; font-size: 12.5px; }
+.pair-head .sub { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.pair-body { display: grid; grid-template-columns: 1fr 1fr; }
+.pair-body .replica + .replica { border-left: 2px dashed var(--line); }
+
+.replica { padding: 6px 3px 7px; display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.replica.gone { background: #f4f1f4; }
+.replica.deciding { background: #fff4e0; }
+
+.face { width: 40px; height: 40px; display: block; transition: opacity 150ms; }
+/* An idle replica is alive but not in this game: translucent, not greyed out. */
+.face-idle { opacity: 0.3; }
+.face-awake, .face-deciding { opacity: 1; }
+.face-gone { opacity: 0.7; }
+
+.replica .tag { font-size: 9.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.replica .state { font-size: 8.5px; font-weight: 800; text-transform: uppercase; min-height: 11px; color: var(--bad); }
+.replica .buttons { display: flex; gap: 2px; margin-top: 2px; }
+.replica .buttons button {
+  padding: 2px 4px; font-size: 9px; border-width: 2px; border-radius: 5px;
+  box-shadow: 0 2px 0 var(--ink);
+}
+
+.caption {
+  text-align: center; font-size: 11.5px; color: var(--muted);
+  margin: 12px auto 4px; max-width: 560px; line-height: 1.4;
+}
+
+/* ------------------------------------------------------------------ table */
+
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th {
+  text-align: left; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--muted); padding: 0 6px 6px; border-bottom: 2px solid var(--line);
+}
+td { padding: 5px 6px; border-bottom: 1px solid var(--line); font-size: 13px; }
+
+.games { max-height: 250px; overflow-y: auto; }
+tr.live td { background: #fff4e0; }
+tr.fresh td { background: #fdf0d8; }
+.pending { color: var(--line); }
+.cooperate { color: var(--good); font-weight: 700; }
+.cheat { color: var(--bad); font-weight: 700; }
+.delta { font-weight: 700; }
+
+.board td:first-child { font-weight: 700; }
+.board .score { text-align: right; font-weight: 800; }
+.board .bar { width: 46%; }
+.board .bar div { height: 9px; border-radius: 5px; background: var(--accent); border: 2px solid var(--ink); min-width: 3px; transition: width 200ms; }
+
+.log { max-height: 420px; overflow-y: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
+.log div { padding: 2px 0; border-bottom: 1px solid var(--line); display: flex; gap: 8px; }
+.log .s { color: var(--muted); min-width: 30px; }
+.log .r { color: var(--muted); min-width: 74px; }
+
+footer { margin-top: 26px; padding-top: 14px; border-top: 2px solid var(--line); font-size: 12px; color: var(--muted); }
+footer a { color: var(--accent); }

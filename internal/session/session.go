@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -33,9 +34,17 @@ type Defect struct {
 	ImpureClock bool
 	// CorruptPayoff makes the replica mis-apply scores while still deciding
 	// plausibly.
+	//
+	// This is only caught while the replica is replaying, because that is the
+	// window the canonical chain covers -- it is admission control, not a live
+	// policy (see platform.StateValidator). So injecting it into a replica with
+	// no history to rebuild catches nothing, correctly: there is no past for it
+	// to have got wrong yet, and its emissions stay plausible until something
+	// finally reads the scores it has been quietly ruining.
 	CorruptPayoff bool
 	// CorruptFromGame delays CorruptPayoff, so a restarting replica replays
-	// correctly for a while and then diverges at a visible point.
+	// correctly for a while and then diverges at a visible point. Set it inside
+	// the range the replica will actually replay.
 	CorruptFromGame int64
 	// SkipWatermark makes CopyLeader read the newest scores rather than the ones
 	// scoped to its own game. Dormant in v1; breaks invariant 1 in v2.
@@ -74,6 +83,11 @@ type Config struct {
 	// against as it applies events. Nil disables the check, which is what the
 	// run that generates the reference has to do.
 	Reference *golden.Validator
+	// StartPaused holds admission from the moment the session is built, so
+	// nothing happens until something asks for it. A server wants this: a viewer
+	// pressing Play should see the tournament from its first event, not join one
+	// already in progress because the page took a moment to connect.
+	StartPaused bool
 }
 
 func (c Config) withDefaults() Config {
@@ -140,6 +154,10 @@ type Session struct {
 	cancel        context.CancelFunc
 	sequencerDone chan struct{}
 	started       bool
+	// finished is set once the tournament has stopped. A session that has ended
+	// is not controllable: restarting a replica into a cancelled context would
+	// appear to work and then do nothing, which is worse than being refused.
+	finished bool
 
 	// Wait is one-shot but callable from anywhere: the registry waits on every
 	// session it owns, and whoever holds a handle will naturally wait too. Running
@@ -153,6 +171,10 @@ func New(cfg Config) *Session {
 	cfg = cfg.withDefaults()
 	sequencer := platform.NewSequencer()
 	pacer := platform.NewPacer(cfg.Interval)
+	if cfg.StartPaused {
+		// Paused before Run is ever called, so no event can slip out first.
+		pacer.Pause()
+	}
 	sequencer.SetPacer(pacer)
 
 	s := &Session{
@@ -292,6 +314,7 @@ func (s *Session) shutdown() Result {
 	s.cancel()
 
 	s.mu.Lock()
+	s.finished = true
 	quarantined := make([]string, 0)
 	for _, sl := range s.slots {
 		if sl.running {
@@ -342,6 +365,9 @@ func (s *Session) Kill(component, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.finished {
+		return errFinished
+	}
 	sl, err := s.findLocked(component, id)
 	if err != nil {
 		return err
@@ -378,6 +404,9 @@ func (s *Session) restart(component, id string, defect Defect) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.finished {
+		return errFinished
+	}
 	sl, err := s.findLocked(component, id)
 	if err != nil {
 		return err
@@ -492,6 +521,17 @@ func (s *Session) componentIsLive(component string) bool {
 		}
 	}
 	return false
+}
+
+// errFinished is returned by the fault-injection controls once the tournament
+// has ended.
+var errFinished = errors.New("session: the tournament has finished")
+
+// Finished reports whether the tournament has stopped.
+func (s *Session) Finished() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.finished
 }
 
 func (s *Session) findLocked(component, id string) (*slot, error) {

@@ -10,6 +10,14 @@ import (
 	"order_of_things/internal/session"
 )
 
+// play resumes a session. Registry sessions are created paused, so that a viewer
+// pressing Play sees the tournament from its first event rather than joining one
+// already in progress.
+func play(handle *session.Handle) *session.Handle {
+	handle.Session.Resume()
+	return handle
+}
+
 func registry(t *testing.T, games int) (*session.Registry, *golden.Store) {
 	t.Helper()
 	store, err := golden.Open("")
@@ -61,13 +69,13 @@ func TestRegistryReproducesASeed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	firstResult := first.Session.Wait()
+	firstResult := play(first).Session.Wait()
 
 	second, err := r.Create(ctx, 1234)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	secondResult := second.Session.Wait()
+	secondResult := play(second).Session.Wait()
 
 	if first.Id == second.Id {
 		t.Error("two sessions were given the same id")
@@ -121,7 +129,7 @@ func TestRegistryGeneratesAReferenceForEverySession(t *testing.T) {
 	}
 
 	// And the live session reproduces it.
-	result := handle.Session.Wait()
+	result := play(handle).Session.Wait()
 	if result.StateHash != recorded.StateHash {
 		t.Errorf("live session state root %016x, reference %016x", result.StateHash, recorded.StateHash)
 	}
@@ -182,7 +190,7 @@ func TestRegistryResultIsAvailableOnlyWhenFinished(t *testing.T) {
 		t.Error("Result returned something for an unknown id")
 	}
 
-	result := handle.Session.Wait()
+	result := play(handle).Session.Wait()
 	waitFor(t, "the registry to record the result", func() bool {
 		_, ok := r.Result(handle.Id)
 		return ok
@@ -287,7 +295,7 @@ func TestSessionOutlivesTheCreatingContext(t *testing.T) {
 	}
 	cancel()
 
-	result := handle.Session.Wait()
+	result := play(handle).Session.Wait()
 	if result.Games != 20 {
 		t.Errorf("completed %d of 20 games after the creating context was cancelled", result.Games)
 	}
@@ -310,7 +318,7 @@ func TestRegistryRunsSessionsConcurrently(t *testing.T) {
 
 	roots := make(map[int64]uint64)
 	for _, handle := range handles {
-		result := handle.Session.Wait()
+		result := play(handle).Session.Wait()
 		if result.Games != 25 {
 			t.Errorf("session %s completed %d of 25 games", handle.Id, result.Games)
 		}
@@ -342,7 +350,7 @@ func TestReferencesPersistAcrossRegistries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	handle.Session.Wait()
+	play(handle).Session.Wait()
 	first.StopAll()
 
 	reopened, err := golden.Open(path)
@@ -361,7 +369,7 @@ func TestReferencesPersistAcrossRegistries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create in a fresh registry: %v", err)
 	}
-	if got := revived.Session.Wait(); len(got.Quarantined) != 0 {
+	if got := play(revived).Session.Wait(); len(got.Quarantined) != 0 {
 		t.Errorf("a clean session failed the persisted reference: %v", got.Quarantined)
 	}
 }

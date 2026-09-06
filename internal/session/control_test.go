@@ -222,7 +222,11 @@ func TestRestartWithImpureClockIsRefusedRejoin(t *testing.T) {
 // replica ran catches it -- which is also the answer to a defect present in both
 // halves of a pair, where the two agree with each other while both being wrong.
 func TestCorruptStateIsCaughtOnlyByTheCanonicalChain(t *testing.T) {
-	defect := session.Defect{CorruptPayoff: true, CorruptFromGame: 25}
+	// Corrupt from game 5, and restart at game 20, so the defect falls inside the
+	// history the replica has to rebuild. That is the window the chain covers: it
+	// is admission control for a replica replaying the past, so a defect that only
+	// bites after it has rejoined is not this mechanism's to catch.
+	defect := session.Defect{CorruptPayoff: true, CorruptFromGame: 5}
 
 	t.Run("missed without a reference", func(t *testing.T) {
 		if got := restartWithDefect(t, defect, nil); len(got) != 0 {
@@ -290,4 +294,37 @@ func restartWithDefect(t *testing.T, defect session.Defect, ref *golden.Validato
 		t.Fatalf("completed %d of 80 games", result.Games)
 	}
 	return result.Quarantined
+}
+
+// A defective replica that wins a race puts a bad event into the log, so every
+// component's state legitimately stops matching the canonical chain. The chain
+// check must not react to that: it is admission control for a replica rebuilding
+// the past, not a live policy. Policing it live would quarantine the whole system
+// on one bad admission, healthy components included.
+func TestOneBadAdmissionDoesNotQuarantineEveryone(t *testing.T) {
+	ref := reference(t, 42, 60)
+
+	// Bug a replica from the start, so it races -- and sometimes wins -- rather
+	// than only ever replaying.
+	s, _ := started(t, session.Config{
+		Seed: 42, Games: 60, Replicas: 2, Reference: ref,
+		Bug: &session.Bug{Component: "flipper", Replica: "r1",
+			Defect: session.Defect{ImpureClock: true}},
+	})
+	result := s.Wait()
+
+	if result.Games != 60 {
+		t.Fatalf("completed %d of 60 games; the system collapsed instead of losing one replica", result.Games)
+	}
+	if len(result.Quarantined) != 1 {
+		t.Fatalf("quarantined %v, want exactly one half of the flipper pair", result.Quarantined)
+	}
+	if got := result.Quarantined[0]; got != "flipper/r0" && got != "flipper/r1" {
+		t.Errorf("quarantined %q, want a flipper replica", got)
+	}
+	for _, st := range s.Status() {
+		if st.Component != "flipper" && st.Quarantined {
+			t.Errorf("%s/%s was quarantined by an unrelated replica's bug", st.Component, st.Replica)
+		}
+	}
 }

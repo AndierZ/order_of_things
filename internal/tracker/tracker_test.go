@@ -14,23 +14,6 @@ func sequenced(seq int64, payload any) *platform.Event {
 	}
 }
 
-func newTracker(target int) *Tracker {
-	t := &Tracker{
-		gameStore: fsm.NewGameStore(),
-		events:    make([]LoggedEvent, 0, eventFeed),
-		wins:      make(map[string]int),
-		target:    target,
-		done:      make(chan struct{}),
-	}
-	t.snapshot.Store(&Snapshot{
-		Seq:         -1,
-		Leaderboard: []fsm.LeaderboardEntry{},
-		Events:      []LoggedEvent{},
-		Wins:        map[string]int{},
-	})
-	return t
-}
-
 func playGame(tr *Tracker, seq int64, a, b fsm.Strategy, da, db fsm.Decision) int64 {
 	tr.HandleEvent(sequenced(seq, fsm.NewGame{Id: seq, StrategyA: a, StrategyB: b}))
 	tr.HandleEvent(sequenced(seq+1, fsm.GameDecision{Strategy: a, Decision: da}))
@@ -131,10 +114,10 @@ func TestDoneFiresOnceAtTheTarget(t *testing.T) {
 	playGame(tr, seq, fsm.Flipper, fsm.Retaliator, fsm.Cheat, fsm.Cheat)
 }
 
-// The event feed is what the UI draws the machine from, and Replica is the only
-// field in a snapshot that is not a logical fact -- it is which half of the pair
-// won the race, and the only place active-active is visible.
-func TestEventFeedRecordsWhoWonEachPosition(t *testing.T) {
+// The feed is what the UI folds. Replica is the only field in it that is not a
+// logical fact -- it is which half of the pair won the race, and the only place
+// active-active is visible.
+func TestFeedRecordsWhoWonEachPosition(t *testing.T) {
 	tr := newTracker(0)
 	tr.HandleEvent(&platform.Event{
 		Header:  platform.Header{Seq: 0, SenderComponent: "game-injector", SenderId: "r1"},
@@ -145,21 +128,24 @@ func TestEventFeedRecordsWhoWonEachPosition(t *testing.T) {
 		Payload: fsm.GameDecision{Strategy: fsm.Flipper, Decision: fsm.Cheat},
 	})
 
-	events := tr.Snapshot().Events
-	if len(events) != 2 {
-		t.Fatalf("feed has %d events, want 2", len(events))
+	feed := tr.Snapshot().Feed
+	if len(feed) != 2 {
+		t.Fatalf("feed has %d events, want 2", len(feed))
 	}
-	if events[0].Component != "game-injector" || events[0].Replica != "r1" {
-		t.Errorf("event 0 = %+v, want game-injector/r1", events[0])
+	if feed[0].Kind != KindNewGame || feed[0].Component != "game-injector" || feed[0].Replica != "r1" {
+		t.Errorf("feed[0] = %+v, want a new-game from game-injector/r1", feed[0])
 	}
-	if events[0].Kind != "new-game" || events[0].Detail != "#0 flipper vs cooperator" {
-		t.Errorf("event 0 description = %q / %q", events[0].Kind, events[0].Detail)
+	if feed[0].StrategyA != fsm.Flipper || feed[0].StrategyB != fsm.Cooperator {
+		t.Errorf("feed[0] participants = %s vs %s", feed[0].StrategyA, feed[0].StrategyB)
 	}
-	if events[1].Replica != "r0" || events[1].Kind != "decision" {
-		t.Errorf("event 1 = %+v, want a decision from r0", events[1])
+	if feed[1].Kind != KindDecision || feed[1].Replica != "r0" {
+		t.Errorf("feed[1] = %+v, want a decision from r0", feed[1])
 	}
-	if events[1].Detail != "flipper cheats" {
-		t.Errorf("event 1 detail = %q, want %q", events[1].Detail, "flipper cheats")
+	if feed[1].Strategy != fsm.Flipper || feed[1].Decision != "cheat" {
+		t.Errorf("feed[1] decision = %s %s, want flipper cheat", feed[1].Strategy, feed[1].Decision)
+	}
+	if feed[1].GameId != 0 {
+		t.Errorf("feed[1] gameId = %d, want 0", feed[1].GameId)
 	}
 
 	wins := tr.Snapshot().Wins
@@ -168,22 +154,56 @@ func TestEventFeedRecordsWhoWonEachPosition(t *testing.T) {
 	}
 }
 
-func TestEventFeedIsBounded(t *testing.T) {
+// A game completing is not an event on the wire -- it is derived when the second
+// decision lands. The tracker emits it so the browser does not need its own copy
+// of the payoff rules.
+func TestFeedDerivesGameCompletion(t *testing.T) {
+	tr := newTracker(0)
+	playGame(tr, 0, fsm.Flipper, fsm.Cooperator, fsm.Cheat, fsm.Cooperate)
+
+	feed := tr.Snapshot().Feed
+	if len(feed) != 4 {
+		t.Fatalf("feed has %d events, want 4 (new-game, two decisions, completion)", len(feed))
+	}
+	for i, want := range []string{KindNewGame, KindDecision, KindDecision, KindGameCompleted} {
+		if feed[i].Kind != want {
+			t.Errorf("feed[%d] kind = %q, want %q", i, feed[i].Kind, want)
+		}
+		if feed[i].Index != i {
+			t.Errorf("feed[%d] index = %d", i, feed[i].Index)
+		}
+	}
+
+	completion := feed[3]
+	if completion.PayoffA != 3 || completion.PayoffB != -1 {
+		t.Errorf("payoffs = (%d, %d), want (3, -1)", completion.PayoffA, completion.PayoffB)
+	}
+	if len(completion.Leaderboard) != 2 || completion.Leaderboard[0].Strategy != fsm.Flipper {
+		t.Errorf("completion leaderboard = %v, want flipper leading", completion.Leaderboard)
+	}
+	// The completion shares a sequence number with the decision that caused it:
+	// one admitted event, two things for the UI to do.
+	if completion.Seq != feed[2].Seq {
+		t.Errorf("completion seq = %d, decision seq = %d", completion.Seq, feed[2].Seq)
+	}
+}
+
+// A client that reconnects has to be able to catch up from where it left off, so
+// the feed keeps the whole session rather than a sliding window.
+func TestFeedKeepsTheWholeSession(t *testing.T) {
 	tr := newTracker(0)
 	seq := int64(0)
-	for i := 0; i < eventFeed+20; i++ {
+	const games = 40
+	for i := 0; i < games; i++ {
 		seq = playGame(tr, seq, fsm.Flipper, fsm.Cooperator, fsm.Cheat, fsm.Cooperate)
 	}
-	events := tr.Snapshot().Events
-	if len(events) != eventFeed {
-		t.Fatalf("feed has %d events, want %d", len(events), eventFeed)
+	feed := tr.Snapshot().Feed
+	if want := games * 4; len(feed) != want {
+		t.Fatalf("feed has %d events after %d games, want %d", len(feed), games, want)
 	}
-	if last := events[len(events)-1].Seq; last != seq-1 {
-		t.Errorf("feed ends at seq %d, want %d", last, seq-1)
-	}
-	for i := 1; i < len(events); i++ {
-		if events[i].Seq != events[i-1].Seq+1 {
-			t.Fatalf("feed has a gap at %d: %d then %d", i, events[i-1].Seq, events[i].Seq)
+	for i := range feed {
+		if feed[i].Index != i {
+			t.Fatalf("feed[%d] has index %d; indices must be contiguous for resume to work", i, feed[i].Index)
 		}
 	}
 }
@@ -200,8 +220,8 @@ func TestSnapshotCollectionsAreCopies(t *testing.T) {
 	}
 	playGame(tr, seq, fsm.Retaliator, fsm.CopyLeader, fsm.Cheat, fsm.Cheat)
 
-	if len(early.Events) != 3 {
-		t.Errorf("an earlier snapshot's feed grew to %d events", len(early.Events))
+	if len(early.Feed) != 4 {
+		t.Errorf("an earlier snapshot's feed grew to %d events", len(early.Feed))
 	}
 	if early.Wins["test/r0"] != 3 {
 		t.Errorf("an earlier snapshot's wins changed to %v", early.Wins)

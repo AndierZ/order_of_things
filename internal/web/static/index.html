@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Order of Things</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<section class="welcome">
+  <h1>The Order of Things</h1>
+  <p>Four strategies play a repeated game. Each one needs a different amount of
+     the world to make up its mind &mdash; and that, exactly, is how much
+     coordination it costs to run.</p>
+  <div class="cast" id="cast"></div>
+  <button class="primary" id="play">Play</button>
+  <div class="seed">
+    <label>same tournament every time &mdash; seed
+      <input id="seed" type="text" inputmode="numeric" placeholder="random">
+    </label>
+  </div>
+</section>
+
+<main class="game">
+  <div class="topbar">
+    <h1>The Order of Things</h1>
+    <div class="meta">
+      seed <span id="metaSeed">&mdash;</span> &middot;
+      game <span id="metaGame">0</span>/<span id="metaGames">0</span> &middot;
+      state root <span id="metaHash">&mdash;</span>
+    </div>
+    <div class="controls">
+      <button id="pause">Pause</button>
+      <button id="step">Step</button>
+    </div>
+  </div>
+
+  <div class="banner" id="banner"></div>
+
+  <section class="panel machine-panel">
+    <h2>The machine</h2>
+
+    <div class="hub">
+      <div class="sequencer" id="sequencer">
+        <div class="title">Sequencer</div>
+        <div class="seq" id="seqNum">&mdash;</div>
+        <div class="sub">one gate, one order</div>
+        <div class="pulse"></div>
+      </div>
+    </div>
+    <div class="drop"></div>
+    <div class="bus"></div>
+
+    <div class="nodes">
+      <div class="node">
+        <div class="box">
+          <div class="name">Injector</div>
+          <div class="sub">when a game may start</div>
+        </div>
+      </div>
+      <div class="node" id="pair-cooperator"></div>
+      <div class="node" id="pair-flipper"></div>
+      <div class="node" id="pair-retaliator"></div>
+      <div class="node" id="pair-copy-leader"></div>
+      <div class="node">
+        <div class="box">
+          <div class="name">Tracker</div>
+          <div class="sub">folds it into scores</div>
+        </div>
+      </div>
+    </div>
+
+    <p class="caption">Every component subscribes to the same gate and sees the same
+       events in the same order &mdash; which is the only reason two replicas of a
+       player can be trusted to agree.</p>
+  </section>
+
+  <div class="layout">
+    <div>
+      <section class="panel">
+        <h2>Event log</h2>
+        <div class="log" id="log"></div>
+      </section>
+    </div>
+
+    <div>
+      <section class="panel">
+        <h2>Leaderboard</h2>
+        <table class="board"><tbody id="board"></tbody></table>
+      </section>
+
+      <section class="panel">
+        <h2>Games</h2>
+        <div class="games">
+          <table>
+            <thead>
+              <tr><th>#</th><th>Player A</th><th></th><th>Player B</th><th></th><th>Score</th></tr>
+            </thead>
+            <tbody id="games"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <footer>
+    Inspired by <a href="https://ncase.me/trust/" target="_blank" rel="noopener">Nicky
+    Case&rsquo;s <em>The Evolution of Trust</em></a>, which this borrows its
+    payoff matrix and its whole way of explaining things from.
+  </footer>
+</main>
+
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>

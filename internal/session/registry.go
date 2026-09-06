@@ -12,8 +12,10 @@ import (
 
 // DefaultGames is how many games a session plays. Fixed rather than unbounded so
 // that a canonical reference for the whole run can be generated up front, which
-// is what a restarting replica is validated against.
-const DefaultGames = 100
+// is what a restarting replica is validated against. Twenty games at one event
+// per second is about a minute, which is long enough to kill something and watch
+// it recover without being long enough to lose the viewer.
+const DefaultGames = 20
 
 // DefaultInterval is the starting pace: one event per second, slow enough to
 // follow by eye.
@@ -115,11 +117,12 @@ func (r *Registry) Create(ctx context.Context, seed int64) (*Handle, error) {
 	}
 
 	live := New(Config{
-		Seed:      seed,
-		Games:     games,
-		Replicas:  2,
-		Interval:  interval,
-		Reference: reference,
+		Seed:        seed,
+		Games:       games,
+		Replicas:    2,
+		Interval:    interval,
+		Reference:   reference,
+		StartPaused: true,
 	})
 
 	sessionCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))

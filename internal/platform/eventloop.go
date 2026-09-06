@@ -19,8 +19,8 @@ import (
 // the first point at which an emission will actually be transmitted.
 type EventloopHandler func(*Event) any
 
-// StateValidator checks a component's state root against a reference after each
-// event it applies. Returning an error quarantines the replica.
+// StateValidator checks a replica's state root against a reference while it
+// replays the log at boot. Returning an error refuses it rejoin.
 //
 // This is the second, independent quarantine path. The one built into the
 // sequencer client compares what a replica *emitted* against what the log
@@ -28,6 +28,14 @@ type EventloopHandler func(*Event) any
 // which of two disagreeing replicas is right. This one compares what a replica
 // *computed* against a reference established before it ran, which catches a
 // corrupted transition function and does say which side is wrong.
+//
+// It deliberately stops at the end of replay. The chain describes the canonical
+// tournament, so if a defective replica ever wins a race its bad event enters the
+// log and every component's state legitimately stops matching -- running this
+// check live would then quarantine the entire system on one bad admission,
+// healthy components included. Admission control is what this is for: prove a
+// replica rebuilt the past correctly, then let it take its chances in the
+// present like everyone else.
 type StateValidator interface {
 	Validate(seq int64, root uint64) error
 }
@@ -41,15 +49,18 @@ type Eventloop struct {
 
 	stateRoot func() uint64
 	validator StateValidator
+	// replaying is true until the in-band activation marker arrives, which is
+	// exactly the window the state-root check applies to.
+	replaying bool
 }
 
 // Option configures an event loop at construction.
 type Option func(*Eventloop)
 
-// WithStateValidation checks the component's state root against a reference
-// after every applied event, including every event replayed at boot. Checking
-// during replay is the point: a restarting replica is refused rejoin before it
-// can serve, rather than after it has already answered something wrong.
+// WithStateValidation checks the component's state root against a reference for
+// every event it replays at boot, and not afterwards. That is the point of it: a
+// restarting replica is refused rejoin before it can serve, rather than after it
+// has already answered something wrong.
 func WithStateValidation(stateRoot func() uint64, validator StateValidator) Option {
 	return func(e *Eventloop) {
 		e.stateRoot, e.validator = stateRoot, validator
@@ -67,6 +78,7 @@ func NewEventloop(
 		sequencerClient: NewSequencerClient(component, componentId, sequencer),
 		eventHandler:    eventHandler,
 		sequencer:       sequencer,
+		replaying:       true,
 	}
 	for _, opt := range opts {
 		opt(e)
@@ -112,7 +124,11 @@ func (e *Eventloop) Run(ctx context.Context) error {
 }
 
 func (e *Eventloop) validateState(event *Event) error {
-	if e.validator == nil || e.stateRoot == nil || event.IsReplayComplete() {
+	if event.IsReplayComplete() {
+		e.replaying = false
+		return nil
+	}
+	if !e.replaying || e.validator == nil || e.stateRoot == nil {
 		return nil
 	}
 	return e.validator.Validate(event.Header.Seq, e.stateRoot())

@@ -142,10 +142,18 @@ func DecideFor(self fsm.Strategy, cfg Config) Decide {
 // which half was right.
 func impure(decide Decide) Decide {
 	return func(store *fsm.GameStore, self fsm.Strategy, game *fsm.Game) fsm.Decision {
-		if time.Now().UnixNano()%2 == 0 {
+		honest := decide(store, self, game)
+		if time.Now().UnixNano()%2 != 0 {
+			return honest
+		}
+		// Invert rather than substituting a fixed answer. Returning a constant
+		// only diverges when the honest answer happened to be the other one,
+		// which halves the detection rate again and makes the defect look
+		// intermittent when it is really the detector that is being starved.
+		if honest == fsm.Cooperate {
 			return fsm.Cheat
 		}
-		return decide(store, self, game)
+		return fsm.Cooperate
 	}
 }
 

@@ -31,8 +31,8 @@ beyond the order of the log.
 ## The races are still there
 
 It would be easy to read the above as "this system is deterministic, therefore
-nothing races." It is the opposite. **Two runs of this tournament do not produce
-the same log, and never will.**
+nothing races." It is the opposite. **Two runs of this tournament do not necessarily
+produce the same log, and never need to.**
 
 Every player is two replicas computing the same answer and racing to the
 sequencer. Whichever arrives first is admitted; the other is dropped as a

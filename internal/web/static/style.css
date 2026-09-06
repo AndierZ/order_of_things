@@ -148,9 +148,12 @@ body.playing .welcome { display: none; }
   border-bottom: 2px solid var(--line); background: #faf6ef;
 }
 .pair-head .name { font-weight: 800; font-size: 12.5px; }
-.pair-head .does { font-size: 10.5px; color: var(--ink); line-height: 1.25; }
-/* What it reads is what it costs: the coordination tier, in four words. */
-.pair-head .sub { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; margin-top: 1px; }
+/* What a player does, and underneath it what it reads -- which is what it costs.
+   Same treatment as every other label on the diagram: a name in ink, its
+   explanation in grey underneath. A player is a node on the bus like the injector
+   and the tracker are, so it should not be shouting where they murmur. */
+.pair-head .does,
+.pair-head .sub { font-size: 10px; color: var(--muted); line-height: 1.25; }
 .pair-body { display: grid; grid-template-columns: 1fr 1fr; }
 .pair-body .replica + .replica { border-left: 2px dashed var(--line); }
 

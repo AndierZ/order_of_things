@@ -1,2 +1,9 @@
 /order_of_things
 *.tmp
+
+# Generated, not authored. The canonical reference is a pure function of the seed
+# and the code, so any run regenerates it in a few milliseconds -- and a copy left
+# over from an older build is worse than none, because nothing checks that a
+# stored reference still matches the code that reads it. It would simply be
+# believed, and healthy replicas would be refused for disagreeing with it.
+/testdata/

@@ -30,6 +30,7 @@
       state root <span id="metaHash">&mdash;</span>
     </div>
     <div class="controls">
+      <button id="mute" hidden aria-pressed="false" title="Mute the music">Sound on</button>
       <button id="pause">Pause</button>
       <button id="step">Step</button>
     </div>
@@ -70,9 +71,7 @@
       </div>
     </div>
 
-    <p class="caption">Every component subscribes to the same gate and sees the same
-       events in the same order &mdash; which is the only reason two replicas of a
-       player can be trusted to agree.</p>
+    <p class="caption">Each component runs on its own goroutine and can be killed (K), Restarted (R) or Restarted with a correctness bug (B).</p>
   </section>
 
   <div class="layout">
@@ -109,6 +108,12 @@
     payoff matrix and its whole way of explaining things from.
   </footer>
 </main>
+
+<!-- Embedded in the binary rather than hotlinked, so the demo has no runtime
+     dependency on anything outside itself. preload is metadata only: the track is
+     a couple of megabytes and nobody who never presses Play should pay for it.
+     The page works fine if the file is absent -- the button just stays hidden. -->
+<audio id="theme" loop preload="metadata" src="/static/background.m4a"></audio>
 
 <script type="module" src="/static/app.js"></script>
 </body>

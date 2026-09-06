@@ -138,11 +138,13 @@ body.playing .welcome { display: none; }
 .pair.playing { background: #fff4e0; box-shadow: 0 0 0 2px var(--accent); }
 .pair.playing .pair-head { background: #ffeccd; }
 .pair-head {
-  padding: 4px 6px 3px; text-align: center;
+  padding: 5px 6px 4px; text-align: center;
   border-bottom: 2px solid var(--line); background: #faf6ef;
 }
 .pair-head .name { font-weight: 800; font-size: 12.5px; }
-.pair-head .sub { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.pair-head .does { font-size: 10.5px; color: var(--ink); line-height: 1.25; }
+/* What it reads is what it costs: the coordination tier, in four words. */
+.pair-head .sub { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; margin-top: 1px; }
 .pair-body { display: grid; grid-template-columns: 1fr 1fr; }
 .pair-body .replica + .replica { border-left: 2px dashed var(--line); }
 

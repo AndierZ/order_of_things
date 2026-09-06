@@ -124,3 +124,7 @@ is detected, not correctness. Each is a scoping decision, argued in
 
 Inspired by [Nicky Case's *The Evolution of Trust*](https://ncase.me/trust/),
 which this borrows its payoff matrix and its whole way of explaining things from.
+
+Music by Zian Xu, made with [Suno](https://suno.com/s/yjNvZutbRTCvK0ko) and
+embedded in the binary, so the demo has no runtime dependency on anything outside
+itself. There is a mute button.

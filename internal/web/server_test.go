@@ -466,3 +466,35 @@ func TestDeleteSession(t *testing.T) {
 		t.Errorf("deleting twice returned %d, want 404", res.StatusCode)
 	}
 }
+
+// The music is optional: the page has to work whether or not the audio file has
+// been dropped into the static directory, so a missing one must 404 cleanly
+// rather than breaking the build or the page.
+func TestPageWorksWithoutTheAudioFile(t *testing.T) {
+	server := newTestServer(t)
+
+	res, err := server.Client().Get(server.URL + "/")
+	if err != nil {
+		t.Fatalf("get /: %v", err)
+	}
+	body, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("GET / returned %d", res.StatusCode)
+	}
+	for _, want := range []string{`id="theme"`, `id="mute"`, "/static/background.m4a"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("index does not wire up %q", want)
+		}
+	}
+
+	// Present or absent, the page is unaffected; only the button's visibility is.
+	res, err = server.Client().Get(server.URL + "/static/background.m4a")
+	if err != nil {
+		t.Fatalf("get the music: %v", err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK && res.StatusCode != http.StatusNotFound {
+		t.Errorf("GET /static/background.m4a returned %d, want 200 or 404", res.StatusCode)
+	}
+}

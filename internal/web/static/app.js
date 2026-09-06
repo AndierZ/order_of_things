@@ -13,6 +13,16 @@ import { characterSvg } from "/static/characters.js";
 const STRATEGIES = ["cooperator", "flipper", "retaliator", "copy-leader"];
 const REPLICAS = ["r0", "r1"];
 
+// What each player does, and -- the point of the whole thing -- how much of the
+// world it has to look at to do it. The two are the same sentence: the wider the
+// view, the more coordination that player costs to run.
+const BLURBS = {
+  cooperator: ["always cooperates", "looks at nothing"],
+  flipper: ["flips its own last move", "looks at its own past"],
+  retaliator: ["mirrors this opponent", "looks at this pairing"],
+  "copy-leader": ["copies whoever leads", "looks at every score"],
+};
+
 const $ = id => document.getElementById(id);
 
 const state = {
@@ -55,7 +65,70 @@ function start(session) {
   buildPlayers();
   connect();
   control("start");
+  startMusic();
 }
+
+// --------------------------------------------------------------------- music
+
+// Background music, if the file is there. Everything below degrades to nothing
+// when it is not: the button stays hidden and the page is otherwise unchanged.
+//
+// Playback starts from the Play click rather than on load, because browsers only
+// release audio on a user gesture -- and because music starting before anyone has
+// asked for it is rude.
+const MUTE_KEY = "oot.muted";
+const theme = $("theme");
+
+function readMuted() {
+  try {
+    return localStorage.getItem(MUTE_KEY) === "1";
+  } catch {
+    return false; // private windows and blocked storage
+  }
+}
+
+function writeMuted(muted) {
+  try {
+    localStorage.setItem(MUTE_KEY, muted ? "1" : "0");
+  } catch {
+    /* a remembered preference is a convenience, not a requirement */
+  }
+}
+
+let musicAvailable = true;
+theme.addEventListener("error", () => {
+  musicAvailable = false;
+  $("mute").hidden = true;
+});
+
+function paintMute() {
+  const button = $("mute");
+  button.textContent = theme.muted ? "Sound off" : "Sound on";
+  button.setAttribute("aria-pressed", String(theme.muted));
+  button.title = theme.muted ? "Unmute the music" : "Mute the music";
+}
+
+function startMusic() {
+  if (!musicAvailable) return;
+  theme.volume = 0.32;
+  theme.muted = readMuted();
+  paintMute();
+  theme.play().then(
+    () => {
+      $("mute").hidden = false;
+    },
+    () => {
+      // Refused despite the gesture, or there is nothing to play.
+      $("mute").hidden = true;
+    },
+  );
+}
+
+$("mute").addEventListener("click", () => {
+  theme.muted = !theme.muted;
+  writeMuted(theme.muted);
+  paintMute();
+});
 
 // ------------------------------------------------------------------ controls
 
@@ -99,7 +172,8 @@ function buildPlayers() {
       <div class="pair" id="pairbox-${strategy}">
         <div class="pair-head">
           <div class="name">${strategy}</div>
-          <div class="sub">active-active pair</div>
+          <div class="does">${BLURBS[strategy][0]}</div>
+          <div class="sub">${BLURBS[strategy][1]}</div>
         </div>
         <div class="pair-body">
           ${REPLICAS.map(replica => `

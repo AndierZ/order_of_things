@@ -403,3 +403,80 @@ func strategyNames() []string {
 	}
 	return names
 }
+
+// The case that broke the claim on the page: bug a replica when there is almost
+// nothing logged yet. Replaying the log so far asks it to decide barely anything,
+// so it sails through, goes live, wins a race, and puts its wrong answer into the
+// log -- at which point the healthy sibling disagrees with the record and
+// quarantines itself, and every later restart is refused for disagreeing too.
+//
+// Rehearsing against the whole canonical tournament closes it: a defect that
+// would ever show up has to show up before the candidate is connected to
+// anything. Run repeatedly, because the failure it guards against was a race.
+func TestBuggedReplicaIsRefusedEvenWithNothingLoggedYet(t *testing.T) {
+	ref := reference(t, 42, 40)
+
+	for attempt := 0; attempt < 6; attempt++ {
+		func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			s := session.New(session.Config{
+				Seed: 42, Games: 40, Replicas: 2, Reference: ref, StartPaused: true,
+			})
+			s.Start(ctx)
+
+			// Nothing has been admitted at all: the log is empty.
+			if err := s.RestartWithBug("flipper", "r1", session.Defect{ImpureClock: true}); err != nil {
+				t.Fatalf("attempt %d: %v", attempt, err)
+			}
+			if got := status(t, s, "flipper", "r1"); !got.Quarantined || got.Running {
+				t.Fatalf("attempt %d: bugged replica = %+v, want refused before it ran", attempt, got)
+			}
+			if got := status(t, s, "flipper", "r0"); got.Quarantined {
+				t.Fatalf("attempt %d: the healthy replica was quarantined instead", attempt)
+			}
+
+			// The healthy half carries the player, and the outcome is untouched.
+			s.Resume()
+			result := s.Wait()
+			if result.Games != 40 {
+				t.Fatalf("attempt %d: completed %d of 40 games", attempt, result.Games)
+			}
+			if len(result.Quarantined) != 1 || result.Quarantined[0] != "flipper/r1" {
+				t.Fatalf("attempt %d: quarantined %v, want exactly [flipper/r1]", attempt, result.Quarantined)
+			}
+			if got, _ := ref.Root(int64(result.LogLength - 1)); got != result.StateHash {
+				t.Fatalf("attempt %d: outcome left the canonical chain", attempt)
+			}
+		}()
+	}
+}
+
+// And a clean replica passes rehearsal and rejoins, from the same standing start.
+func TestCleanReplicaPassesRehearsalFromAnEmptyLog(t *testing.T) {
+	ref := reference(t, 42, 40)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	s := session.New(session.Config{
+		Seed: 42, Games: 40, Replicas: 2, Reference: ref, StartPaused: true,
+	})
+	s.Start(ctx)
+
+	if err := s.Restart("flipper", "r1"); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	if got := status(t, s, "flipper", "r1"); got.Quarantined || !got.Running {
+		t.Fatalf("a clean replica was refused: %+v", got)
+	}
+
+	s.Resume()
+	result := s.Wait()
+	if result.Games != 40 {
+		t.Errorf("completed %d of 40 games", result.Games)
+	}
+	if len(result.Quarantined) != 0 {
+		t.Errorf("quarantined %v, want none", result.Quarantined)
+	}
+}

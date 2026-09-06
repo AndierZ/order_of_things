@@ -172,7 +172,8 @@ func (r *Registry) reference(ctx context.Context, seed int64, games int) (*golde
 	}
 
 	// Unpaced, single instance, no defects, and explicitly no validator -- there
-	// is nothing to validate against yet, and this run is what defines it.
+	// is nothing to validate against yet, and this run is what defines it, log
+	// and all.
 	result := New(Config{Seed: seed, Games: games, Replicas: 1}).Run(ctx)
 	if result.Games != games {
 		return nil, fmt.Errorf("session: reference run for seed %d reached only %d of %d games",

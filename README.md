@@ -35,14 +35,24 @@ No snapshots, no state transfer, no catch-up protocol — it re-derives the past
 from the same events everyone else saw.
 
 **Verification before trust.** This is the part that makes it a debugger. A
-recovering replica replays against a canonical chain of state roots, generated
-before it ever ran, and is refused readmission if it diverges. Not "we noticed
-later" — refused at the door, at the exact event where it first went wrong:
+recovering replica replays the *entire* canonical tournament in private — every
+event, every emission, every state root — before it is connected to anything, and
+is refused readmission if it diverges anywhere. Not "we noticed later" — refused
+at the door, at the exact event where it first went wrong:
 
 ```
-Eventloop quarantined: replayed state diverges from the canonical chain
-for seed 20260906 at seq 2: state root d76b9… want 7ab00…
+Rehearsal refused: session: flipper/r1 failed rehearsal at seq 7:
+computed GameDecision{flipper cheat}, canonical is GameDecision{flipper cooperate}
 ```
+
+Replaying only the log *so far* is not enough, and the gap is not academic: a
+corrupted decision function looks perfect until it is asked to decide, and the
+history a replica happens to rejoin against may never have asked it. Let such a
+replica through and it wins a race, its wrong answer enters the log, and the
+*healthy* sibling is the one that disagrees with the record and quarantines —
+after which every later restart is refused for disagreeing too. Rehearsing
+against the whole canonical tournament closes that, because a defect that would
+ever show up has to show up while the candidate is still talking to nobody.
 
 **Cheap redundancy.** Active-active is normally hard: you cannot re-run
 side-effecting code twice and reconcile the results. It is trivial here precisely

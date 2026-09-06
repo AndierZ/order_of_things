@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -105,6 +106,9 @@ func (c Config) withDefaults() Config {
 // against.
 type component interface {
 	Run(ctx context.Context) error
+	// HandleEvent applies one event outside any event loop, which is what lets a
+	// candidate replica be rehearsed privately before it is wired to anything.
+	HandleEvent(*platform.Event) any
 	StateHash() uint64
 }
 
@@ -113,7 +117,7 @@ type component interface {
 type slot struct {
 	component string
 	id        string
-	build     func(Defect) component
+	build     func(*platform.Sequencer, Defect) component
 	// defect is what this slot was last built with, so a restart without an
 	// explicit defect comes back clean rather than inheriting one.
 	defect Defect
@@ -153,6 +157,7 @@ type Session struct {
 
 	pacer *platform.Pacer
 	chain []uint64
+	log   []golden.Event
 	// lifecycle serializes the operator actions -- kill, restart -- which have to
 	// release mu while they wait for a goroutine to stop. Without it two of them
 	// could interleave in that window and leave a slot running two instances.
@@ -198,7 +203,7 @@ func New(cfg Config) *Session {
 	s.slots = append(s.slots, &slot{
 		component: tracker.Component,
 		id:        "r0",
-		build:     func(Defect) component { return s.tracker },
+		build:     func(*platform.Sequencer, Defect) component { return s.tracker },
 	})
 
 	var validator platform.StateValidator
@@ -208,12 +213,12 @@ func New(cfg Config) *Session {
 
 	for r := 0; r < cfg.Replicas; r++ {
 		id := fmt.Sprintf("r%d", r)
-		s.add(injector.Component, id, func(Defect) component {
-			return injector.NewGameInjector(id, cfg.Seed, cfg.Games, sequencer, validator)
+		s.add(injector.Component, id, func(seq *platform.Sequencer, _ Defect) component {
+			return injector.NewGameInjector(id, cfg.Seed, cfg.Games, seq, validator)
 		})
 		for _, name := range fsm.AllStrategies {
-			s.add(string(name), id, func(defect Defect) component {
-				return strategy.New(name, id, sequencer, strategy.Config{
+			s.add(string(name), id, func(seq *platform.Sequencer, defect Defect) component {
+				return strategy.New(name, id, seq, strategy.Config{
 					SkipWatermark:   defect.SkipWatermark,
 					ImpureClock:     defect.ImpureClock,
 					CorruptPayoff:   defect.CorruptPayoff,
@@ -234,7 +239,7 @@ func New(cfg Config) *Session {
 	return s
 }
 
-func (s *Session) add(component, id string, build func(Defect) component) {
+func (s *Session) add(component, id string, build func(*platform.Sequencer, Defect) component) {
 	s.slots = append(s.slots, &slot{
 		component: component, id: id, build: build, restartable: true,
 	})
@@ -256,6 +261,7 @@ type Result struct {
 	StateHash   uint64
 	LogLength   int
 	Chain       []uint64
+	Log         []golden.Event
 	Quarantined []string
 }
 
@@ -267,6 +273,7 @@ func (r Result) Golden() golden.Outcome {
 		StateHash:   r.StateHash,
 		Leaderboard: r.Leaderboard,
 		Chain:       r.Chain,
+		Log:         r.Log,
 	}
 }
 
@@ -295,7 +302,7 @@ func (s *Session) Start(ctx context.Context) {
 func (s *Session) startLocked(sl *slot) {
 	ctx, cancel := context.WithCancel(s.ctx)
 	done := make(chan struct{})
-	instance := sl.build(sl.defect)
+	instance := sl.build(s.sequencer, sl.defect)
 
 	sl.gen++
 	sl.cancel, sl.done = cancel, done
@@ -379,9 +386,11 @@ func (s *Session) shutdown() Result {
 	// which is what a replaying replica is actually checked against.
 	replay := fsm.NewGameStore()
 	s.chain = make([]uint64, 0, len(s.sequencer.EventLog()))
+	s.log = make([]golden.Event, 0, len(s.sequencer.EventLog()))
 	for _, e := range s.sequencer.EventLog() {
 		replay.ApplyEvent(e.Header.Seq, e.Payload)
 		s.chain = append(s.chain, replay.StateHash())
+		s.log = append(s.log, golden.NewEvent(e.Header.Seq, e.Header.SenderComponent, e.Payload))
 	}
 
 	store := s.tracker.GameStore()
@@ -392,6 +401,7 @@ func (s *Session) shutdown() Result {
 		StateHash:   store.StateHash(),
 		LogLength:   len(s.sequencer.EventLog()),
 		Chain:       s.chain,
+		Log:         s.log,
 		Quarantined: quarantined,
 	}
 }
@@ -496,6 +506,23 @@ func (s *Session) restart(component, id string, defect Defect) error {
 	if running {
 		cancel()
 		<-done
+	}
+
+	// Rehearse before wiring it to anything. A candidate that cannot reproduce
+	// the canonical tournament is refused here, having spoken to nobody -- which
+	// is the only point at which refusing it is free.
+	if s.cfg.Reference != nil {
+		// A private sequencer: the candidate is built against something inert so
+		// that nothing it does during rehearsal can reach the live stream.
+		candidate := sl.build(platform.NewSequencer(), defect)
+		if err := rehearse(candidate, sl.component, s.cfg.Reference); err != nil {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			sl.defect = defect
+			sl.quarantined, sl.running, sl.killed = true, false, false
+			log.Printf("Rehearsal refused: %v", err)
+			return nil
+		}
 	}
 
 	s.mu.Lock()

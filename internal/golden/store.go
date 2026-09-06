@@ -28,6 +28,39 @@ import (
 	"order_of_things/internal/fsm"
 )
 
+// Event is one admitted event of the canonical tournament, in a form that
+// survives being written to disk and read back.
+type Event struct {
+	Seq       int64             `json:"seq"`
+	Component string            `json:"component"`
+	NewGame   *fsm.NewGame      `json:"newGame,omitempty"`
+	Decision  *fsm.GameDecision `json:"decision,omitempty"`
+}
+
+// Payload rebuilds the value the component originally emitted.
+func (e Event) Payload() any {
+	switch {
+	case e.NewGame != nil:
+		return *e.NewGame
+	case e.Decision != nil:
+		return *e.Decision
+	default:
+		return nil
+	}
+}
+
+// NewEvent captures an admitted event.
+func NewEvent(seq int64, component string, payload any) Event {
+	event := Event{Seq: seq, Component: component}
+	switch v := payload.(type) {
+	case fsm.NewGame:
+		event.NewGame = &v
+	case fsm.GameDecision:
+		event.Decision = &v
+	}
+	return event
+}
+
 // Outcome is the canonical result of a tournament.
 type Outcome struct {
 	Seed        int64                  `json:"seed"`
@@ -37,6 +70,12 @@ type Outcome struct {
 	// Chain is the state root after each event, indexed by sequence number. A
 	// replica that has replayed up to seq N is checked against Chain[N].
 	Chain []uint64 `json:"chain,omitempty"`
+	// Log is the canonical tournament in full. A replica rejoining is made to
+	// replay all of it privately before it is allowed near the live stream --
+	// which is the only way to catch a defect that has not happened yet. A
+	// corrupted decision function looks perfect until it is asked to decide, and
+	// what has been logged so far may not have asked it.
+	Log []Event `json:"log,omitempty"`
 }
 
 // RootAt returns the canonical state root after the event at seq, and false if
@@ -70,6 +109,30 @@ func (e *DivergenceError) Error() string {
 // serve, which is the point of checking at all.
 type Validator struct {
 	outcome Outcome
+}
+
+// Log is the canonical tournament, for a replica to rehearse against.
+func (v *Validator) Log() []Event {
+	if v == nil {
+		return nil
+	}
+	return v.outcome.Log
+}
+
+// Root returns the canonical state root after the event at seq.
+func (v *Validator) Root(seq int64) (uint64, bool) {
+	if v == nil {
+		return 0, false
+	}
+	return v.outcome.RootAt(seq)
+}
+
+// Seed is the tournament this validator describes.
+func (v *Validator) Seed() int64 {
+	if v == nil {
+		return 0
+	}
+	return v.outcome.Seed
 }
 
 // Validate reports whether the state root a replica computed after applying the
@@ -150,7 +213,7 @@ func (s *Store) Get(seed int64, games int) (Outcome, bool) {
 // have to special-case the first run of a seed.
 func (s *Store) Validator(seed int64, games int) *Validator {
 	outcome, ok := s.Get(seed, games)
-	if !ok || len(outcome.Chain) == 0 {
+	if !ok || len(outcome.Chain) == 0 || len(outcome.Log) == 0 {
 		return nil
 	}
 	return &Validator{outcome: outcome}

@@ -87,13 +87,13 @@ body.playing .welcome { display: none; }
 }
 .panel > h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 12px; }
 
-/* ---------------------------------------------------------------- machine */
+/* ----------------------------------------------------------------- system */
 
 /* The diagram makes one claim: everything hangs off a single gate. A sequencer at
    the top, one bus, and every component -- injector, both halves of all four
    players, tracker -- dropping onto it. Nothing talks to anything else. */
 
-.machine-panel { padding-bottom: 8px; }
+.system-panel { padding-bottom: 8px; }
 .hub { display: flex; justify-content: center; }
 
 .sequencer {
@@ -132,6 +132,11 @@ body.playing .welcome { display: none; }
 
 /* A player is one box with two replicas inside it: four players, not eight. */
 .pair { border: 2.5px solid var(--ink); border-radius: 12px; background: #fff; overflow: hidden; }
+/* Both participants light up for the whole game rather than the highlight
+   hopping from one to the other as each takes its turn. The turn order is a
+   detail of how a game is recorded; who is playing is the thing worth seeing. */
+.pair.playing { background: #fff4e0; box-shadow: 0 0 0 2px var(--accent); }
+.pair.playing .pair-head { background: #ffeccd; }
 .pair-head {
   padding: 4px 6px 3px; text-align: center;
   border-bottom: 2px solid var(--line); background: #faf6ef;
@@ -143,12 +148,11 @@ body.playing .welcome { display: none; }
 
 .replica { padding: 6px 3px 7px; display: flex; flex-direction: column; align-items: center; gap: 2px; }
 .replica.gone { background: #f4f1f4; }
-.replica.deciding { background: #fff4e0; }
 
 .face { width: 40px; height: 40px; display: block; transition: opacity 150ms; }
 /* An idle replica is alive but not in this game: translucent, not greyed out. */
 .face-idle { opacity: 0.3; }
-.face-awake, .face-deciding { opacity: 1; }
+.face-awake { opacity: 1; }
 .face-gone { opacity: 0.7; }
 
 .replica .tag { font-size: 9.5px; color: var(--muted); font-variant-numeric: tabular-nums; }

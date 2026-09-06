@@ -21,7 +21,7 @@ const state = {
   games: 0,
   nextIndex: 0,
   rows: new Map(),   // gameId -> <tr>
-  current: null,     // { id, a, b, next }
+  current: null,     // { id, a, b } — the game in flight, or null between games
   status: null,
   source: null,
 };
@@ -96,7 +96,7 @@ $("step").addEventListener("click", () => control("step"));
 function buildPlayers() {
   for (const strategy of STRATEGIES) {
     $(`pair-${strategy}`).innerHTML = `
-      <div class="pair">
+      <div class="pair" id="pairbox-${strategy}">
         <div class="pair-head">
           <div class="name">${strategy}</div>
           <div class="sub">active-active pair</div>
@@ -105,7 +105,7 @@ function buildPlayers() {
           ${REPLICAS.map(replica => `
             <div class="replica" id="rep-${strategy}-${replica}">
               <div class="art" id="art-${strategy}-${replica}"></div>
-              <div class="tag">${replica} &middot; <span id="wins-${strategy}-${replica}">0</span></div>
+              <div class="tag">${replica}</div>
               <div class="state" id="state-${strategy}-${replica}"></div>
               <div class="buttons">
                 <button data-act="kill" data-c="${strategy}" data-r="${replica}" title="Stop this replica; its partner carries the player alone">K</button>
@@ -125,24 +125,35 @@ function buildPlayers() {
   paintPlayers();
 }
 
+// Is this strategy one of the two playing right now?
+function playing(strategy) {
+  return Boolean(
+    state.current && (state.current.a === strategy || state.current.b === strategy),
+  );
+}
+
+function replicaStatus(strategy, replica) {
+  return state.status?.replicas?.find(
+    r => r.component === strategy && r.replica === replica,
+  );
+}
+
 // A replica's drawn state is the combination of two independent things: whether
 // it is alive (deployment) and whether its strategy is in the current game
 // (tournament). Alive-but-not-playing is translucent; alive-and-playing is solid.
 function faceState(strategy, replica) {
-  const live = state.status?.replicas?.find(
-    r => r.component === strategy && r.replica === replica,
-  );
+  const live = replicaStatus(strategy, replica);
   // Only an explicit kill or a quarantine is a death. Every replica also stops
   // when the tournament ends, and drawing that as eight corpses would say
   // something went wrong when nothing did.
   if (live && (live.killed || live.quarantined)) return "gone";
-  if (!state.current) return "idle";
-  if (state.current.a !== strategy && state.current.b !== strategy) return "idle";
-  return state.current.next === strategy ? "deciding" : "awake";
+  return playing(strategy) ? "awake" : "idle";
 }
 
 function paintPlayers() {
   for (const strategy of STRATEGIES) {
+    $(`pairbox-${strategy}`).classList.toggle("playing", playing(strategy));
+
     for (const replica of REPLICAS) {
       const drawn = faceState(strategy, replica);
       const art = $(`art-${strategy}-${replica}`);
@@ -150,16 +161,11 @@ function paintPlayers() {
         art.dataset.state = drawn;
         art.innerHTML = characterSvg(strategy, drawn);
       }
-      const box = $(`rep-${strategy}-${replica}`);
-      box.classList.toggle("gone", drawn === "gone");
-      box.classList.toggle("deciding", drawn === "deciding");
+      $(`rep-${strategy}-${replica}`).classList.toggle("gone", drawn === "gone");
 
-      const info = state.status?.replicas?.find(
-        r => r.component === strategy && r.replica === replica,
-      );
+      const info = replicaStatus(strategy, replica);
       $(`state-${strategy}-${replica}`).textContent =
         info?.quarantined ? "quarantined" : info?.killed ? "killed" : "";
-      $(`wins-${strategy}-${replica}`).textContent = info?.wins ?? 0;
     }
   }
 }
@@ -198,15 +204,12 @@ function apply(event) {
 
   switch (event.kind) {
     case "new-game":
-      state.current = { id: event.gameId, a: event.strategyA, b: event.strategyB, next: event.strategyA };
+      state.current = { id: event.gameId, a: event.strategyA, b: event.strategyB };
       addGameRow(event);
       break;
 
     case "decision":
       fillDecision(event);
-      if (state.current && state.current.id === event.gameId) {
-        state.current.next = state.current.next === state.current.a ? state.current.b : null;
-      }
       break;
 
     case "game-completed":

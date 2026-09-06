@@ -457,6 +457,11 @@ type ReplicaStatus struct {
 	Defect      Defect
 	// Wins is how many events this replica won the race to admit. A replica that
 	// never wins is a hot standby, not half of an active-active pair.
+	//
+	// The page no longer shows this as a number -- it read like a score and
+	// invited comparison with the leaderboard, which it has nothing to do with.
+	// The event log carries the same fact better: every line names the replica
+	// that won that position.
 	Wins int
 }
 

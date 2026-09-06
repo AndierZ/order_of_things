@@ -41,10 +41,9 @@ function face(state, eyeY, mouthY) {
 }
 
 // characterSvg renders one replica. state is the replica's situation:
-//   idle      - alive, not in the current game (drawn translucent)
-//   awake     - alive and playing this game
-//   deciding  - alive, playing, and it is this strategy's turn
-//   gone      - killed or quarantined
+//   idle   - alive, not in the current game (drawn translucent)
+//   awake  - alive and playing this game
+//   gone   - killed or quarantined
 export function characterSvg(strategy, state) {
   const shape = SHAPES[strategy] || SHAPES.cooperator;
   const fill = state === "gone" ? "#c8c2cc" : shape.fill;

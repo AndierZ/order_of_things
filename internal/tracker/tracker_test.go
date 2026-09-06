@@ -1,6 +1,7 @@
 package tracker
 
 import (
+	"encoding/json"
 	"testing"
 
 	"order_of_things/internal/fsm"
@@ -249,5 +250,34 @@ func TestSnapshotPublishesTheGameInFlight(t *testing.T) {
 	}
 	if got := tr.Snapshot().CurrentGame.NextToMove(); got != fsm.Cooperator {
 		t.Errorf("NextToMove after flipper moved = %q, want cooperator", got)
+	}
+}
+
+// Both players cheating scores zero for each, which is a real result and not an
+// absent one. It has to survive the trip to the page.
+func TestFeedCarriesZeroPayoffs(t *testing.T) {
+	tr := newTracker(0)
+	playGame(tr, 0, fsm.Flipper, fsm.Cooperator, fsm.Cheat, fsm.Cheat)
+
+	completion := tr.Snapshot().Feed[3]
+	if completion.Kind != KindGameCompleted {
+		t.Fatalf("feed[3] is %q, want a completion", completion.Kind)
+	}
+	if completion.PayoffA != 0 || completion.PayoffB != 0 {
+		t.Fatalf("payoffs = (%d, %d), want (0, 0)", completion.PayoffA, completion.PayoffB)
+	}
+
+	encoded, err := json.Marshal(completion)
+	if err != nil {
+		t.Fatalf("encoding: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("decoding: %v", err)
+	}
+	for _, field := range []string{"payoffA", "payoffB"} {
+		if _, present := decoded[field]; !present {
+			t.Errorf("%s was omitted from %s; the page renders it as undefined", field, encoded)
+		}
 	}
 }

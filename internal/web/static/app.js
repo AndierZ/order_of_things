@@ -317,6 +317,10 @@ function connect() {
   source.onerror = () => {
     source.close();
     if (lost) return;
+    // The server closes the stream once the tournament is over: there is nothing
+    // further to send, and holding it open would keep a finished session alive.
+    // That is a normal ending, not a lost connection.
+    if (state.status?.done) return;
     if (++retries > 5) {
       sessionLost();
       return;

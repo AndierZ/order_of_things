@@ -24,7 +24,8 @@ func main() {
 		goldPath = flag.String("golden", "testdata/golden.json", "golden outcome store; empty keeps references in memory only")
 		games    = flag.Int("games", session.DefaultGames, "games per session")
 		interval = flag.Duration("interval", session.DefaultInterval, "pace of admission, one event per interval")
-		idle     = flag.Duration("idle", 10*time.Minute, "stop sessions untouched for this long")
+		idle     = flag.Duration("idle", 2*time.Minute, "stop sessions with no viewer for this long")
+		maxSess  = flag.Int("max-sessions", session.MaxSessions, "cap on concurrent sessions; 0 for no cap")
 		maxAge   = flag.Duration("max-age", time.Hour, "stop sessions older than this")
 		quiet    = flag.Bool("quiet", false, "suppress the platform's own logging")
 	)
@@ -43,6 +44,7 @@ func main() {
 	registry := session.NewRegistry(store)
 	registry.SetGames(*games)
 	registry.SetInterval(*interval)
+	registry.SetMaxSessions(*maxSess)
 	defer registry.StopAll()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -62,8 +64,14 @@ func main() {
 	server := &http.Server{
 		Addr:    *addr,
 		Handler: web.NewServer(registry),
-		// No write timeout: the event stream is a long-lived response.
-		ReadHeaderTimeout: 10 * time.Second,
+		// A whole request, headers and body, has to arrive promptly. Every request
+		// this server accepts is tiny, so a slow one is either broken or hostile.
+		// WriteTimeout stays unset on purpose: the event stream is a long-lived
+		// response and any write deadline would cut it off.
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 14,
 	}
 
 	go func() {
@@ -83,7 +91,9 @@ func main() {
 }
 
 func reclaim(ctx context.Context, registry *session.Registry, idle, maxAge time.Duration) {
-	ticker := time.NewTicker(time.Minute)
+	// Often enough that an abandoned session is not held for much longer than the
+	// idle window it has already outlived.
+	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {

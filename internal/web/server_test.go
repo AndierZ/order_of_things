@@ -528,3 +528,107 @@ func TestPageWorksWithoutTheAudioFile(t *testing.T) {
 		t.Errorf("GET /static/background.m4a returned %d, want 200 or 404", res.StatusCode)
 	}
 }
+
+// A full registry is a capacity answer, not a fault. It has to come back as
+// something a client can act on and a load balancer will not read as a broken
+// server.
+func TestCreateIsRefusedWhenFull(t *testing.T) {
+	store, err := golden.Open("")
+	if err != nil {
+		t.Fatalf("golden: %v", err)
+	}
+	registry := session.NewRegistry(store)
+	registry.SetGames(6)
+	registry.SetInterval(0)
+	registry.SetMaxSessions(2)
+	t.Cleanup(registry.StopAll)
+
+	server := httptest.NewServer(NewServer(registry))
+	t.Cleanup(server.Close)
+
+	for i := 0; i < 2; i++ {
+		createSession(t, server)
+	}
+
+	res, err := server.Client().Post(server.URL+"/api/sessions", "application/json", nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("creating past the cap returned %d, want 503", res.StatusCode)
+	}
+	if res.Header.Get("Retry-After") == "" {
+		t.Error("a 503 with no Retry-After leaves the client guessing")
+	}
+	body, _ := io.ReadAll(res.Body)
+	if !strings.Contains(string(body), "too many sessions") {
+		t.Errorf("body was %q", body)
+	}
+}
+
+// An open stream counts as activity, so a viewer is not reclaimed mid-watch.
+func TestStreamingKeepsTheSessionAlive(t *testing.T) {
+	server := newTestServer(t)
+	created := createSession(t, server)
+
+	// Reading the stream at all must refresh the session's last-used time.
+	readFrames(t, server, "/api/sessions/"+created.Id+"/stream", func(f []frame) bool {
+		return lastStatus(f) != nil
+	})
+
+	res := post(t, server, "/api/sessions/"+created.Id+"/control", `{"action":"pause"}`)
+	res.Body.Close()
+	if res.StatusCode != http.StatusNoContent {
+		t.Fatalf("the session was gone after streaming: %d", res.StatusCode)
+	}
+}
+
+// An oversized or slow body must not be read into memory or hold a handler open.
+func TestControlBodiesAreBounded(t *testing.T) {
+	server := newTestServer(t)
+	created := createSession(t, server)
+
+	huge := `{"action":"pause","pad":"` + strings.Repeat("x", 64<<10) + `"}`
+	res := post(t, server, "/api/sessions/"+created.Id+"/control", huge)
+	res.Body.Close()
+	if res.StatusCode != http.StatusBadRequest {
+		t.Errorf("a 64KB control body returned %d, want 400", res.StatusCode)
+	}
+
+	// And the session is untouched by the attempt.
+	res = post(t, server, "/api/sessions/"+created.Id+"/control", `{"action":"pause"}`)
+	res.Body.Close()
+	if res.StatusCode != http.StatusNoContent {
+		t.Errorf("an ordinary control after an oversized one returned %d", res.StatusCode)
+	}
+}
+
+// The stream ends when the tournament does. Holding it open would keep touching
+// a session that has already stopped everything it started, pinning it for as
+// long as the tab exists.
+func TestStreamClosesWhenTheTournamentFinishes(t *testing.T) {
+	server := newTestServer(t)
+	created := createSession(t, server)
+	post(t, server, "/api/sessions/"+created.Id+"/control", `{"action":"start"}`).Body.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet,
+		server.URL+"/api/sessions/"+created.Id+"/stream", nil)
+	res, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	defer res.Body.Close()
+
+	// Read to EOF. If the server kept the stream open this would block until the
+	// test's own deadline instead.
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("reading the stream to its end: %v", err)
+	}
+	if !strings.Contains(string(body), `"done":true`) {
+		t.Error("the stream ended without ever reporting the tournament finished")
+	}
+}

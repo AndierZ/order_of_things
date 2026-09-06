@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -9,6 +10,28 @@ import (
 
 	"order_of_things/internal/golden"
 )
+
+// StopTimeout bounds how long the registry waits for a session to shut down.
+//
+// A session that will not stop is a bug, but blocking on it forever turns one
+// stuck session into a stuck server: the reclaim loop never ticks again, so
+// nothing is ever reclaimed after the first hang, and the mechanism meant to
+// contain bad sessions is taken out by one. Better to give up on it loudly, leak
+// its goroutines, and keep serving.
+const StopTimeout = 10 * time.Second
+
+// MaxSessions caps how many tournaments may be *running* at once. Every running
+// session is a sequencer and eleven components on their own goroutines, so on a
+// public URL this is the difference between a demo and an invitation.
+//
+// It counts running sessions only. A finished one has already stopped everything
+// it started and costs nothing but the memory holding its result, so letting it
+// occupy a slot would mean a handful of quick tournaments locking out new
+// visitors for no reason at all.
+const MaxSessions = 64
+
+// ErrTooManySessions is returned by Create when the registry is full.
+var ErrTooManySessions = errors.New("session: too many sessions in progress")
 
 // CanonicalSeed fixes which tournament everyone plays.
 //
@@ -40,9 +63,11 @@ const DefaultInterval = time.Second
 // thing shared between them is the golden store, which is the one place a
 // reference outlives the process that produced it.
 type Registry struct {
-	golden   *golden.Store
-	games    int
-	interval time.Duration
+	golden      *golden.Store
+	games       int
+	interval    time.Duration
+	maxSessions int
+	stopTimeout time.Duration
 	// now is injectable so tests do not depend on the clock.
 	now func() time.Time
 
@@ -51,29 +76,42 @@ type Registry struct {
 	// process rather than once per session.
 	canonical map[string]*golden.Validator
 	sessions  map[string]*entry
-	nextId    int
+	// running counts sessions that have not finished, which is what the cap is
+	// about. Kept as a count rather than derived from sessions so that reserving
+	// a slot and doing the work are not the same step.
+	running int
+	nextId  int
 }
 
 type entry struct {
-	id      string
-	session *Session
-	created time.Time
-	touched time.Time
-	cancel  context.CancelFunc
-	done    chan struct{}
-	result  Result
+	id string
+	// finished is set when the tournament has stopped and its goroutines are
+	// gone. A finished entry is retained so its result can still be read, but it
+	// no longer counts as work in progress.
+	finished bool
+	// released guards the running count against being decremented twice, once
+	// when the session finishes and again when the entry is reclaimed.
+	released bool
+	session  *Session
+	created  time.Time
+	touched  time.Time
+	cancel   context.CancelFunc
+	done     chan struct{}
+	result   Result
 }
 
 // NewRegistry returns a registry recording references in store, which may be an
 // in-memory store.
 func NewRegistry(store *golden.Store) *Registry {
 	return &Registry{
-		golden:    store,
-		games:     DefaultGames,
-		interval:  DefaultInterval,
-		now:       time.Now,
-		canonical: make(map[string]*golden.Validator),
-		sessions:  make(map[string]*entry),
+		golden:      store,
+		games:       DefaultGames,
+		interval:    DefaultInterval,
+		maxSessions: MaxSessions,
+		stopTimeout: StopTimeout,
+		now:         time.Now,
+		canonical:   make(map[string]*golden.Validator),
+		sessions:    make(map[string]*entry),
 	}
 }
 
@@ -123,12 +161,30 @@ func (r *Registry) Create(ctx context.Context, seed int64) (*Handle, error) {
 	if seed == 0 {
 		seed = CanonicalSeed
 	}
+
+	// Reserve the slot before doing any of the work. Checking first and starting
+	// afterwards lets a burst all pass the check and each spin up a sequencer and
+	// eleven components before being turned away -- briefly unbounded, which is
+	// precisely what the cap exists to prevent.
 	r.mu.Lock()
+	if r.maxSessions > 0 && r.running >= r.maxSessions {
+		r.mu.Unlock()
+		return nil, ErrTooManySessions
+	}
+	r.running++
 	games, interval := r.games, r.interval
 	r.mu.Unlock()
 
+	// From here the reservation is held, so every path out has to give it back.
+	release := func() {
+		r.mu.Lock()
+		r.running--
+		r.mu.Unlock()
+	}
+
 	reference, err := r.reference(ctx, seed, games)
 	if err != nil {
+		release()
 		return nil, err
 	}
 
@@ -161,12 +217,36 @@ func (r *Registry) Create(ctx context.Context, seed int64) (*Handle, error) {
 	go func() {
 		defer close(e.done)
 		result := live.Wait()
+
+		// Finished: everything it started has stopped, so it stops counting
+		// against the cap even though the entry is kept for its result.
 		r.mu.Lock()
 		e.result = result
+		e.finished = true
+		if !e.released {
+			e.released = true
+			r.running--
+		}
 		r.mu.Unlock()
 	}()
 
 	return &Handle{Id: id, Seed: seed, Games: games, Session: live}, nil
+}
+
+// Running is how many tournaments are in progress, which is what the cap counts.
+func (r *Registry) Running() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.running
+}
+
+// releaseLocked gives back an entry's reservation, at most once. The caller must
+// hold r.mu.
+func (r *Registry) releaseLocked(e *entry) {
+	if !e.released {
+		e.released = true
+		r.running--
+	}
 }
 
 // reference returns the canonical chain for a seed, generating it from the code
@@ -216,6 +296,20 @@ func (r *Registry) reference(ctx context.Context, seed int64, games int) (*golde
 	return validator, nil
 }
 
+// Touch marks a session as recently used without doing anything else, so that a
+// viewer sitting on an open stream counts as activity. Without it a session is
+// only ever touched when a request arrives, and someone watching -- or paused
+// mid-explanation -- would be reclaimed out from under themselves.
+func (r *Registry) Touch(id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.sessions[id]
+	if ok {
+		e.touched = r.now()
+	}
+	return ok
+}
+
 // Get returns a live session by id, marking it as recently used.
 func (r *Registry) Get(id string) (*Handle, bool) {
 	r.mu.Lock()
@@ -234,20 +328,62 @@ func (r *Registry) Get(id string) (*Handle, bool) {
 	}, true
 }
 
+// SetMaxSessions overrides how many sessions may exist at once. Zero removes the
+// cap, which is only sensible somewhere nobody else can reach.
+func (r *Registry) SetMaxSessions(n int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.maxSessions = n
+}
+
+// SetStopTimeout overrides how long shutdown waits for a session that will not
+// stop. Zero waits forever, which tests use to assert clean teardown.
+func (r *Registry) SetStopTimeout(d time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.stopTimeout = d
+}
+
+// stop shuts a session down, giving up after the timeout rather than waiting on
+// it forever. Reports whether it actually stopped.
+func (r *Registry) stop(e *entry) bool {
+	r.mu.Lock()
+	timeout := r.stopTimeout
+	r.mu.Unlock()
+
+	e.cancel()
+	if timeout <= 0 {
+		<-e.done
+		return true
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-e.done:
+		return true
+	case <-timer.C:
+		// Abandoned rather than waited on. Its goroutines leak, which is a leak
+		// bounded by how often this happens; blocking here instead would wedge
+		// every future reclamation, which is bounded by nothing.
+		log.Printf("session %s did not stop within %v; abandoning it", e.id, timeout)
+		return false
+	}
+}
+
 // Stop ends a session and removes it. Idempotent.
 func (r *Registry) Stop(id string) error {
 	r.mu.Lock()
 	e, ok := r.sessions[id]
 	if ok {
 		delete(r.sessions, id)
+		r.releaseLocked(e)
 	}
 	r.mu.Unlock()
 
 	if !ok {
 		return fmt.Errorf("session: no session %q", id)
 	}
-	e.cancel()
-	<-e.done
+	r.stop(e)
 	return nil
 }
 
@@ -304,14 +440,16 @@ func (r *Registry) Evict(idle, maxAge time.Duration) []string {
 		if now.Sub(e.touched) >= idle || (maxAge > 0 && now.Sub(e.created) >= maxAge) {
 			expired = append(expired, e)
 			delete(r.sessions, id)
+			r.releaseLocked(e)
 		}
 	}
 	r.mu.Unlock()
 
 	stopped := make([]string, 0, len(expired))
 	for _, e := range expired {
-		e.cancel()
-		<-e.done
+		r.stop(e)
+		// Reported as reclaimed either way: it is out of the registry and will
+		// not be served again, whether or not its goroutines got the message.
 		stopped = append(stopped, e.id)
 	}
 	sortIds(stopped)
@@ -325,12 +463,12 @@ func (r *Registry) StopAll() {
 	for id, e := range r.sessions {
 		entries = append(entries, e)
 		delete(r.sessions, id)
+		r.releaseLocked(e)
 	}
 	r.mu.Unlock()
 
 	for _, e := range entries {
-		e.cancel()
-		<-e.done
+		r.stop(e)
 	}
 }
 

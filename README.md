@@ -13,7 +13,7 @@ follows.
 
 This is a working demonstration of what follows. It runs an iterated
 Prisoner's Dilemma tournament — four strategies, each as an active-active pair of
-replicas, nine components in all, every one on its own goroutine — and invites
+replicas, eleven components in all, every one on its own goroutine — and invites
 you to break it while it runs.
 
 ## The claim
@@ -255,6 +255,46 @@ internal/golden     canonical outcomes and chains, persisted
 internal/session    one system instance, plus supervision and fault injection
 internal/web        HTTP, SSE, and the page
 ```
+
+## Running it in public
+
+Sessions are real work — each one is a live tournament with a sequencer and nine
+components on their own goroutines — so the server reclaims them and refuses to
+accumulate them:
+
+| | default | flag |
+|---|---|---|
+| tournaments **in progress** | 64, then `503` with `Retry-After` | `-max-sessions` |
+| reclaimed when unwatched for | 2 minutes | `-idle` |
+| reclaimed regardless after | 1 hour | `-max-age` |
+
+The cap counts tournaments *in progress*, not entries in the registry. A finished
+one has already stopped everything it started and costs nothing but the memory
+holding its result, so counting it would let a handful of quick tournaments lock
+out new visitors for no reason. The slot is also reserved before any work begins,
+so a burst of rejected requests costs nothing — checking first and starting
+afterwards would let them all pass the check and each spin up a sequencer and
+eleven components before being turned away.
+
+An open event stream counts as activity, so a viewer watching — or paused part
+way through explaining something — is not reclaimed out from under themselves.
+Close the tab and the session stops counting as watched immediately, which is why
+the idle window can be short. The stream ends when the tournament does: there is
+nothing further to send, and holding it open would keep a finished session alive
+for as long as the tab existed.
+
+Request bodies are capped at 4KB and the whole request must arrive within 15
+seconds. Every request this server accepts is a few dozen bytes of JSON, so a
+slow or oversized one is either broken or hostile, and without a bound it can
+hold a handler goroutine open inside the decoder for as long as the sender likes.
+`WriteTimeout` stays unset on purpose — any write deadline would cut off the
+event stream.
+
+Shutdown is bounded. A session that will not stop is abandoned after ten seconds
+with a log line rather than waited on, because blocking turns one stuck session
+into a stuck server: the reclaim loop would never tick again and nothing would
+ever be reclaimed after the first hang. Leaking a few goroutines is bounded by
+how often that happens; wedging the reclaimer is bounded by nothing.
 
 ## Deliberate non-goals
 

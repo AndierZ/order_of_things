@@ -20,6 +20,7 @@ package web
 import (
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -37,6 +38,11 @@ var assets embed.FS
 // an implementation detail of the transport: what reaches the browser is still
 // events in order, never a snapshot of aggregate state.
 const pollInterval = 40 * time.Millisecond
+
+// maxBody bounds a control request. Every request this server accepts is a few
+// dozen bytes of JSON; without a bound a slow or oversized body can hold a
+// handler goroutine open inside the decoder for as long as the sender likes.
+const maxBody = 4 << 10
 
 // Server exposes a session registry over HTTP.
 type Server struct {
@@ -84,6 +90,13 @@ type sessionResponse struct {
 func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	// No seed: every session is the canonical tournament.
 	handle, err := s.registry.Create(r.Context(), 0)
+	if errors.Is(err, session.ErrTooManySessions) {
+		// Full, not broken. Say so with a status a client can act on, and one that
+		// a load balancer will not mistake for a bug in the server.
+		w.Header().Set("Retry-After", "30")
+		http.Error(w, "too many sessions in progress, try again shortly", http.StatusServiceUnavailable)
+		return
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -112,7 +125,7 @@ func (s *Server) control(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req controlRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody)).Decode(&req); err != nil {
 		http.Error(w, "bad request body", http.StatusBadRequest)
 		return
 	}
@@ -145,7 +158,7 @@ func (s *Server) replicaAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req replicaRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody)).Decode(&req); err != nil {
 		http.Error(w, "bad request body", http.StatusBadRequest)
 		return
 	}
@@ -249,6 +262,12 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 
 	var lastStatus string
 	for {
+		// An open stream is a viewer. Without this a session is only ever touched
+		// when a request arrives, so someone watching -- or paused part way through
+		// explaining it -- would be reclaimed out from under themselves.
+		if !s.registry.Touch(handle.Id) {
+			return // reclaimed or stopped while we were streaming
+		}
 		snapshot := handle.Session.Tracker().Snapshot()
 
 		// Events first, so the page never learns a game is over before it has
@@ -268,6 +287,14 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		flusher.Flush()
+
+		// A finished tournament has nothing more to send, and holding the stream
+		// open would keep touching the session for as long as the tab exists --
+		// pinning a session that has already stopped everything it started. The
+		// client has folded the whole feed by now and needs nothing further.
+		if status.Done {
+			return
+		}
 
 		select {
 		case <-r.Context().Done():

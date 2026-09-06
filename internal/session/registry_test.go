@@ -2,7 +2,10 @@ package session_test
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
+	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -392,5 +395,189 @@ func TestReferencesPersistAcrossRegistries(t *testing.T) {
 	}
 	if got := play(revived).Session.Wait(); len(got.Quarantined) != 0 {
 		t.Errorf("a clean session failed the persisted reference: %v", got.Quarantined)
+	}
+}
+
+// A session nobody is watching has to go, and the commonest way to leave one is
+// to pause it and close the tab: paused means it will never finish on its own, so
+// nothing but the idle sweep will ever reclaim it.
+func TestPausedAbandonedSessionIsReclaimed(t *testing.T) {
+	r, _ := registry(t, 100) // long enough that it cannot finish by itself
+	ctx := context.Background()
+
+	handle, err := r.Create(ctx, 0)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	handle.Session.Pause()
+	if r.Len() != 1 {
+		t.Fatalf("Len = %d, want 1", r.Len())
+	}
+
+	// Nobody touches it again -- the tab is gone.
+	time.Sleep(20 * time.Millisecond)
+	stopped := r.Evict(10*time.Millisecond, 0)
+
+	if len(stopped) != 1 || stopped[0] != handle.Id {
+		t.Fatalf("evicted %v, want the abandoned session %q", stopped, handle.Id)
+	}
+	if r.Len() != 0 {
+		t.Errorf("Len = %d after eviction", r.Len())
+	}
+	// And it really stopped, rather than being dropped while still running.
+	if got := handle.Session.Wait(); got.Games >= 100 {
+		t.Errorf("a paused session somehow completed: %d games", got.Games)
+	}
+}
+
+// Touch is what makes an open stream count as activity, so a viewer who is
+// watching -- or paused part way through explaining something -- is not reclaimed
+// out from under themselves.
+func TestTouchKeepsAWatchedSessionAlive(t *testing.T) {
+	r, _ := registry(t, 100)
+	ctx := context.Background()
+
+	watched, err := r.Create(ctx, 0)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	abandoned, err := r.Create(ctx, 0)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	watched.Session.Pause()
+	abandoned.Session.Pause()
+
+	time.Sleep(20 * time.Millisecond)
+	if !r.Touch(watched.Id) { // as the stream does on every poll
+		t.Fatal("Touch reported the watched session as gone")
+	}
+
+	stopped := r.Evict(15*time.Millisecond, 0)
+	if len(stopped) != 1 || stopped[0] != abandoned.Id {
+		t.Fatalf("evicted %v, want only the abandoned session %q", stopped, abandoned.Id)
+	}
+	if _, ok := r.Get(watched.Id); !ok {
+		t.Error("the watched session was reclaimed despite being touched")
+	}
+	if r.Touch("nope") {
+		t.Error("Touch reported an unknown session as present")
+	}
+}
+
+// The cap is what stops a public URL being an invitation: every session is a live
+// tournament with a sequencer and nine components on their own goroutines.
+func TestConcurrentSessionsAreCapped(t *testing.T) {
+	r, _ := registry(t, 10)
+	r.SetMaxSessions(3)
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		if _, err := r.Create(ctx, 0); err != nil {
+			t.Fatalf("create %d: %v", i, err)
+		}
+	}
+	if _, err := r.Create(ctx, 0); !errors.Is(err, session.ErrTooManySessions) {
+		t.Fatalf("creating past the cap gave %v, want ErrTooManySessions", err)
+	}
+	if r.Len() != 3 {
+		t.Errorf("Len = %d, want 3", r.Len())
+	}
+
+	// Reclaiming one makes room again.
+	r.Evict(0, 0)
+	if r.Len() != 0 {
+		t.Fatalf("Len = %d after evicting everything", r.Len())
+	}
+	if _, err := r.Create(ctx, 0); err != nil {
+		t.Errorf("create after making room: %v", err)
+	}
+}
+
+// Concurrent creates must not all slip past the cap: the reference run releases
+// the lock, so the check has to be repeated where the id is assigned.
+func TestTheCapHoldsUnderConcurrentCreates(t *testing.T) {
+	r, _ := registry(t, 10)
+	r.SetMaxSessions(4)
+	ctx := context.Background()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r.Create(ctx, 0)
+		}()
+	}
+	wg.Wait()
+
+	if got := r.Len(); got > 4 {
+		t.Errorf("%d sessions exist, cap is 4", got)
+	}
+}
+
+// The cap counts tournaments in progress, not entries in the map. A finished
+// session has already stopped everything it started, so letting it hold a slot
+// would mean a handful of quick tournaments locking out new visitors for nothing.
+func TestFinishedSessionsDoNotHoldASlot(t *testing.T) {
+	r, _ := registry(t, 6)
+	r.SetMaxSessions(3)
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		handle, err := r.Create(ctx, 0)
+		if err != nil {
+			t.Fatalf("create %d: %v", i, err)
+		}
+		handle.Session.Resume()
+		handle.Session.Wait()
+	}
+	waitFor(t, "the registry to notice they finished", func() bool {
+		return r.Running() == 0
+	})
+
+	// All three are still retained, and all three slots are free.
+	if r.Len() != 3 {
+		t.Errorf("Len = %d, want the three finished sessions retained", r.Len())
+	}
+	if _, err := r.Create(ctx, 0); err != nil {
+		t.Errorf("a create was refused while three finished sessions sat in the map: %v", err)
+	}
+}
+
+// Reserving before doing the work is the difference between refusing a burst and
+// briefly starting one. Every rejected create must cost nothing.
+func TestRejectedCreatesStartNothing(t *testing.T) {
+	r, _ := registry(t, 100) // long enough that nothing finishes on its own
+	r.SetMaxSessions(2)
+	ctx := context.Background()
+
+	before := runtime.NumGoroutine()
+
+	var wg sync.WaitGroup
+	accepted := make(chan struct{}, 40)
+	for i := 0; i < 40; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := r.Create(ctx, 0); err == nil {
+				accepted <- struct{}{}
+			}
+		}()
+	}
+	wg.Wait()
+	close(accepted)
+
+	if got := len(accepted); got > 2 {
+		t.Fatalf("%d creates accepted, cap is 2", got)
+	}
+	if got := r.Running(); got > 2 {
+		t.Errorf("running = %d, cap is 2", got)
+	}
+
+	// Two sessions are ~2 x (sequencer + eleven components) plus channel
+	// plumbing. Forty of them would be an order of magnitude more than this.
+	if grew := runtime.NumGoroutine() - before; grew > 200 {
+		t.Errorf("38 rejected creates left %d extra goroutines behind", grew)
 	}
 }

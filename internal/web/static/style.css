@@ -80,6 +80,9 @@ body.playing .welcome { display: none; }
 }
 .banner.show { display: block; }
 .banner.done { background: #d9f2df; }
+/* A refused action is a different kind of message from the state of the session,
+   so it gets its own line rather than overwriting it. */
+.banner.notice { background: #ffdcd2; font-weight: 600; font-size: 13.5px; }
 
 .layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr); gap: 20px; }
 @media (max-width: 980px) { .layout { grid-template-columns: 1fr; } }

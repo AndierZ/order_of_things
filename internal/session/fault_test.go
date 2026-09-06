@@ -480,3 +480,68 @@ func TestCleanReplicaPassesRehearsalFromAnEmptyLog(t *testing.T) {
 		t.Errorf("quarantined %v, want none", result.Quarantined)
 	}
 }
+
+// The defect the UI injects has to be caught every single time. An intermittent
+// one is not good enough: rehearsal asks a player for all of its decisions inside
+// a loop lasting microseconds, so on a machine whose clock granularity is coarser
+// than that loop, a clock-dependent defect reads the same instant every time,
+// comes out honest, and is let through -- to diverge later, live, where decisions
+// are a second apart. That is a true property of intermittent faults, and a
+// terrible thing to hang a demonstration on.
+func TestTheInjectedDefectIsRefusedEveryTime(t *testing.T) {
+	ref := reference(t, 42, 25)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	const tries = 60
+	for i := 0; i < tries; i++ {
+		s := session.New(session.Config{
+			Seed: 42, Games: 25, Replicas: 2, Reference: ref, StartPaused: true,
+		})
+		s.Start(ctx)
+
+		if err := s.RestartWithBug("flipper", "r1", session.Defect{WrongDecision: true}); err != nil {
+			t.Fatalf("try %d: %v", i, err)
+		}
+		if got := status(t, s, "flipper", "r1"); !got.Quarantined || got.Running {
+			t.Fatalf("try %d: bugged replica = %+v, want refused", i, got)
+		}
+		if got := status(t, s, "flipper", "r0"); got.Quarantined {
+			t.Fatalf("try %d: the healthy replica was quarantined instead", i)
+		}
+		s.Kill("flipper", "r0")
+	}
+}
+
+// Hammering the button is the reported reproduction: repeated bugged restarts on
+// one replica must never let one through, and must never touch its partner.
+func TestRepeatedBuggedRestartsNeverLetOneThrough(t *testing.T) {
+	ref := reference(t, 42, 25)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	s := session.New(session.Config{
+		Seed: 42, Games: 25, Replicas: 2, Reference: ref, Interval: time.Millisecond,
+	})
+	s.Start(ctx)
+
+	for i := 0; i < 40; i++ {
+		if err := s.RestartWithBug("flipper", "r1", session.Defect{WrongDecision: true}); err != nil {
+			break // the tournament finished under us, which is fine
+		}
+		if got := status(t, s, "flipper", "r1"); !got.Quarantined {
+			t.Fatalf("click %d: bugged replica came back running: %+v", i, got)
+		}
+		if got := status(t, s, "flipper", "r0"); got.Quarantined {
+			t.Fatalf("click %d: the healthy partner was quarantined: %+v", i, got)
+		}
+	}
+
+	// And it is still recoverable afterwards.
+	if err := s.Restart("flipper", "r1"); err == nil {
+		if got := status(t, s, "flipper", "r1"); got.Quarantined {
+			t.Errorf("a clean restart after the hammering was refused: %+v", got)
+		}
+	}
+	s.Wait()
+}

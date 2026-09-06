@@ -133,26 +133,67 @@ $("mute").addEventListener("click", () => {
 // ------------------------------------------------------------------ controls
 
 async function control(action) {
-  await fetch(`/api/sessions/${state.id}/control`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ action }),
-  });
+  await send(`/api/sessions/${state.id}/control`, { action });
 }
 
 async function replicaAction(component, replica, action, defect) {
-  const res = await fetch(
-    `/api/sessions/${state.id}/replicas/${component}/${replica}`,
-    {
+  await send(`/api/sessions/${state.id}/replicas/${component}/${replica}`, {
+    action,
+    defect: defect || "",
+  });
+}
+
+// send posts a control action and makes sure the viewer learns what happened to
+// it, whatever that was.
+//
+// Every one of these can fail, and a button that silently does nothing is the
+// worst possible answer: it looks exactly like the system ignoring you. A 409 is
+// an ordinary refusal with a reason. A 404 means this session no longer exists --
+// the server has been restarted, or it was reclaimed for being idle -- and no
+// amount of clicking will ever work again, so say so rather than letting the
+// page sit there frozen on its last known state.
+async function send(path, body) {
+  let res;
+  try {
+    res = await fetch(path, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ action, defect: defect || "" }),
-    },
-  );
-  if (res.status === 409) {
-    const body = await res.json();
-    banner(body.error, false);
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    notice(`could not reach the server: ${err.message}`);
+    return false;
   }
+
+  if (res.ok) {
+    // Whatever the last refusal was about, the viewer has now done something
+    // that worked, so it has stopped being the answer to anything.
+    clearNotice();
+    return true;
+  }
+  if (res.status === 404) {
+    sessionLost();
+    return false;
+  }
+  if (res.status === 409) {
+    const failed = await res.json().catch(() => ({}));
+    notice(failed.error || "that could not be done");
+    return false;
+  }
+  notice(`the server refused that (${res.status})`);
+  return false;
+}
+
+// sessionLost is terminal: nothing on the page will work again, so it stops
+// pretending and says why.
+let lost = false;
+function sessionLost() {
+  if (lost) return;
+  lost = true;
+  state.source?.close();
+  notice("This session no longer exists — the server restarted, or it was idle too long. Reload to start a new one.");
+  $("pause").disabled = true;
+  $("step").disabled = true;
 }
 
 $("pause").addEventListener("click", () => {
@@ -194,7 +235,7 @@ function buildPlayers() {
   document.querySelector(".nodes").addEventListener("click", e => {
     const button = e.target.closest("button");
     if (!button) return;
-    replicaAction(button.dataset.c, button.dataset.r, button.dataset.act, "clock");
+    replicaAction(button.dataset.c, button.dataset.r, button.dataset.act, "decision");
   });
   paintPlayers();
 }
@@ -246,7 +287,10 @@ function paintPlayers() {
 
 // -------------------------------------------------------------------- stream
 
+let retries = 0;
+
 function connect() {
+  if (lost) return;
   state.source?.close();
   const source = new EventSource(`/api/sessions/${state.id}/stream?from=${state.nextIndex}`);
   state.source = source;
@@ -263,10 +307,20 @@ function connect() {
     paintStatus();
     paintPlayers();
   });
+  source.addEventListener("open", () => {
+    retries = 0;
+  });
   // Losing the connection is recoverable: reconnect and resume from where the
-  // fold got to, exactly as a restarting replica resumes from the log.
+  // fold got to, exactly as a restarting replica resumes from the log. But not
+  // forever -- a stream that will not come back means the session is gone, and
+  // silently retrying behind a frozen page is worse than saying so.
   source.onerror = () => {
     source.close();
+    if (lost) return;
+    if (++retries > 5) {
+      sessionLost();
+      return;
+    }
     setTimeout(connect, 800);
   };
 }
@@ -390,9 +444,35 @@ function paintStatus() {
   }
 }
 
+// banner carries the state of the session: finished, or stalled and waiting on
+// somebody. It is owned by the status frames.
 function banner(text, done) {
   const el = $("banner");
   el.textContent = text;
   el.classList.add("show");
   el.classList.toggle("done", Boolean(done));
+}
+
+// notice carries the answer to something the viewer just tried and could not do.
+// It gets its own line rather than overwriting the banner: the two say different
+// things, and "the tournament has finished" is the explanation for the refusal
+// rather than a replacement for it.
+//
+// It also has to be its own line for a duller reason. Status frames are only sent
+// when the status changes, and a finished session does not change again -- so a
+// refusal written into the banner would have stayed there for good, with nothing
+// left to put the result back.
+//
+// It stays up until something resolves it: another refusal replaces it, and an
+// action that succeeds clears it. Timing it out would mean the explanation for
+// what just happened could vanish before it had been read, which is the one thing
+// a message like this must not do.
+function notice(text) {
+  const el = $("notice");
+  el.textContent = text.replace(/^session:\s*/, "");
+  el.classList.add("show");
+}
+
+function clearNotice() {
+  $("notice").classList.remove("show");
 }

@@ -321,7 +321,7 @@ func TestRestartActsOnALiveReplica(t *testing.T) {
 	created := createSession(t, server)
 	path := "/api/sessions/" + created.Id + "/replicas/flipper/r1"
 
-	for _, action := range []string{`{"action":"restart"}`, `{"action":"restart-with-bug","defect":"clock"}`} {
+	for _, action := range []string{`{"action":"restart"}`, `{"action":"restart-with-bug","defect":"decision"}`} {
 		res := post(t, server, path, action)
 		body, _ := io.ReadAll(res.Body)
 		res.Body.Close()
@@ -427,6 +427,7 @@ func TestBadRequestsAreRejected(t *testing.T) {
 		{"unknown control", "/api/sessions/" + created.Id + "/control", `{"action":"levitate"}`, http.StatusBadRequest},
 		{"unknown replica action", "/api/sessions/" + created.Id + "/replicas/flipper/r0", `{"action":"levitate"}`, http.StatusBadRequest},
 		{"unknown defect", "/api/sessions/" + created.Id + "/replicas/flipper/r0", `{"action":"restart-with-bug","defect":"nonsense"}`, http.StatusBadRequest},
+		{"clock defect still available", "/api/sessions/" + created.Id + "/replicas/flipper/r0", `{"action":"restart-with-bug","defect":"clock"}`, http.StatusNoContent},
 		{"malformed body", "/api/sessions/" + created.Id + "/control", `{`, http.StatusBadRequest},
 		{"unknown session", "/api/sessions/nope/control", `{"action":"pause"}`, http.StatusNotFound},
 	}

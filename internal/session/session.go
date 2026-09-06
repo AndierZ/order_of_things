@@ -31,7 +31,15 @@ import (
 //	               canonical state-root chain, which does say which is wrong,
 //	               because the reference was computed before either replica ran.
 type Defect struct {
-	// ImpureClock makes the replica's decision depend on the wall clock.
+	// WrongDecision makes the replica answer the opposite of the honest answer,
+	// every time. Deterministically wrong, so a check that runs once catches it
+	// every time on every machine. This is what the UI injects.
+	WrongDecision bool
+	// ImpureClock makes the replica's decision depend on the wall clock. Kept
+	// because it is the canonical violation of invariant 3, but it is
+	// intermittent, and an intermittent fault can pass a finite examination by
+	// luck -- which is a true thing about intermittent faults and a bad thing to
+	// build a demonstration on.
 	ImpureClock bool
 	// CorruptPayoff makes the replica mis-apply scores while still deciding
 	// plausibly.
@@ -54,7 +62,7 @@ type Defect struct {
 
 // Any reports whether the defect asks for anything at all.
 func (d Defect) Any() bool {
-	return d.ImpureClock || d.CorruptPayoff || d.SkipWatermark
+	return d.WrongDecision || d.ImpureClock || d.CorruptPayoff || d.SkipWatermark
 }
 
 // Bug places a Defect on one specific replica at session construction. Only ever
@@ -220,6 +228,7 @@ func New(cfg Config) *Session {
 			s.add(string(name), id, func(seq *platform.Sequencer, defect Defect) component {
 				return strategy.New(name, id, seq, strategy.Config{
 					SkipWatermark:   defect.SkipWatermark,
+					WrongDecision:   defect.WrongDecision,
 					ImpureClock:     defect.ImpureClock,
 					CorruptPayoff:   defect.CorruptPayoff,
 					CorruptFromGame: defect.CorruptFromGame,
@@ -511,17 +520,26 @@ func (s *Session) restart(component, id string, defect Defect) error {
 	// Rehearse before wiring it to anything. A candidate that cannot reproduce
 	// the canonical tournament is refused here, having spoken to nobody -- which
 	// is the only point at which refusing it is free.
+	//
+	// Asked more than once, because a pure function gives the same answer every
+	// time and an impure one may not. This raises the odds against an
+	// intermittent defect; it does not make catching one certain, and nothing
+	// could -- a fault that shows up one time in a thousand will pass any finite
+	// examination nine hundred and ninety-nine times.
 	if s.cfg.Reference != nil {
-		// A private sequencer: the candidate is built against something inert so
-		// that nothing it does during rehearsal can reach the live stream.
-		candidate := sl.build(platform.NewSequencer(), defect)
-		if err := rehearse(candidate, sl.component, s.cfg.Reference); err != nil {
-			s.mu.Lock()
-			defer s.mu.Unlock()
-			sl.defect = defect
-			sl.quarantined, sl.running, sl.killed = true, false, false
-			log.Printf("Rehearsal refused: %v", err)
-			return nil
+		for pass := 0; pass < rehearsalPasses; pass++ {
+			// A private sequencer each time: the candidate is built against
+			// something inert, so nothing it does while being examined can reach
+			// the live stream.
+			candidate := sl.build(platform.NewSequencer(), defect)
+			if err := rehearse(candidate, sl.component, s.cfg.Reference); err != nil {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				sl.defect = defect
+				sl.quarantined, sl.running, sl.killed = true, false, false
+				log.Printf("Rehearsal refused on pass %d: %v", pass+1, err)
+				return nil
+			}
 		}
 	}
 
@@ -637,6 +655,13 @@ func (s *Session) componentIsLive(component string) bool {
 	}
 	return false
 }
+
+// rehearsalPasses is how many times a candidate is made to replay the canonical
+// tournament before it is let in. One pass proves it can reproduce the past; the
+// rest are asking the same question again to see whether it gives the same
+// answer, which is the only thing that distinguishes a pure function from one
+// that happened to be right once.
+const rehearsalPasses = 3
 
 // errFinished is returned by the fault-injection controls once the tournament
 // has ended.

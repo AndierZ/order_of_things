@@ -122,13 +122,26 @@ They are caught by different machinery, which is why both exist:
 
 | defect | what it corrupts | caught by |
 |---|---|---|
-| `ImpureClock` | the **decision** function | comparing this replica's emissions against what the log recorded |
+| `WrongDecision` | the **decision** function | rehearsal, every time — this is what the UI injects |
+| `ImpureClock` | the decision function, *intermittently* | rehearsal, usually — see below |
 | `CorruptPayoff` | the **transition** function | the canonical state-root chain |
 
 The first is invisible to the chain — a replica deciding badly still computes
 state correctly. The second is invisible to the pair — a sibling running the same
 defect agrees with it, which is the known limit of active-active. Only a
 reference computed before either replica ran can say which one is wrong.
+
+`ImpureClock` is kept because reading the wall clock is the canonical violation
+of invariant 3, but it makes a bad demonstration and the reason is worth knowing.
+Rehearsal asks a player for all of its decisions inside a loop lasting
+microseconds. On a machine whose clock granularity is coarser than that loop,
+every call reads the same instant, the whole rehearsal comes out honest, and the
+replica is let through — only to diverge later, live, where decisions are a
+second apart. **An intermittent fault will pass a finite examination**, and no
+amount of checking changes that; rehearsal runs three passes rather than one for
+this reason, which improves the odds and settles nothing. The defect the UI
+injects is deterministically wrong instead, so it is refused every time on every
+machine.
 
 Quarantine refuses a divergent *instance*, not the name forever: redeploy the
 replica clean and it is let back in, having earned it by replaying correctly.

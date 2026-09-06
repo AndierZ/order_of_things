@@ -83,7 +83,25 @@ type Config struct {
 	// It corrupts what the replica *decides*, not what it computes, so it is
 	// caught by comparing emissions against the log -- and deliberately not by
 	// the state-root chain, which this replica satisfies perfectly.
+	//
+	// Being nondeterministic, it is also not reliably caught by any single check:
+	// see WrongDecision.
 	ImpureClock bool
+
+	// WrongDecision inverts every decision. Deterministically wrong rather than
+	// intermittently wrong, which is the difference that matters for a check that
+	// runs once.
+	//
+	// A nondeterministic defect can pass a finite examination by luck, and
+	// ImpureClock does exactly that: rehearsal asks all of a player's decisions
+	// inside a loop lasting microseconds, so on a machine whose clock granularity
+	// is coarser than that loop every call reads the same instant, the whole
+	// rehearsal comes out honest, and it is let through -- only to diverge later,
+	// live, where decisions are a second apart. That is a true property of
+	// intermittent faults and not a bug in the check, but it makes ImpureClock a
+	// poor thing to hang a demonstration on. This one is caught every time, on
+	// every machine, and is what the UI injects.
+	WrongDecision bool
 
 	// CorruptPayoff corrupts what the replica *computes*: it mis-applies scores
 	// while its emissions stay plausible. Nothing in the pair can catch this,
@@ -126,10 +144,26 @@ func New(self fsm.Strategy, replicaId string, sequencer *platform.Sequencer, cfg
 // wrapped around it.
 func DecideFor(self fsm.Strategy, cfg Config) Decide {
 	decide := decideFor(self, cfg)
+	if cfg.WrongDecision {
+		decide = inverted(decide)
+	}
 	if cfg.ImpureClock {
 		decide = impure(decide)
 	}
 	return decide
+}
+
+// inverted answers the opposite of the honest answer, every time. Both replicas
+// still run the same code; only one of them runs this wrapper, so they compute
+// different answers from the same history and the pair diverges immediately and
+// always.
+func inverted(decide Decide) Decide {
+	return func(store *fsm.GameStore, self fsm.Strategy, game *fsm.Game) fsm.Decision {
+		if decide(store, self, game) == fsm.Cooperate {
+			return fsm.Cheat
+		}
+		return fsm.Cooperate
+	}
 }
 
 // impure corrupts a decision function with a dependency on real time. Both

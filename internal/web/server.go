@@ -180,12 +180,17 @@ func (s *Server) replicaAction(w http.ResponseWriter, r *http.Request) {
 
 func parseDefect(name string) (session.Defect, error) {
 	switch name {
-	case "", "clock":
+	case "", "decision":
+		// Deterministically wrong, so it is refused every time. An intermittent
+		// defect can pass a check that runs once, which makes for a demonstration
+		// that works most of the time -- the worst kind.
+		return session.Defect{WrongDecision: true}, nil
+	case "clock":
 		return session.Defect{ImpureClock: true}, nil
 	case "payoff":
 		return session.Defect{CorruptPayoff: true}, nil
 	default:
-		return session.Defect{}, fmt.Errorf("unknown defect %q: want clock or payoff", name)
+		return session.Defect{}, fmt.Errorf("unknown defect %q: want decision, clock or payoff", name)
 	}
 }
 

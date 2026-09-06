@@ -22,16 +22,13 @@ const state = {
   nextIndex: 0,
   rows: new Map(),   // gameId -> <tr>
   current: null,     // { id, a, b, next }
-  decisions: {},     // strategy -> its last decision, drawn as its expression
   status: null,
   source: null,
 };
 
 // ------------------------------------------------------------------- welcome
 
-$("cast").innerHTML = STRATEGIES.map((s, i) =>
-  characterSvg(s, "awake", i % 2 ? "cheat" : "cooperate"),
-).join("");
+$("cast").innerHTML = STRATEGIES.map(s => characterSvg(s, "awake")).join("");
 
 $("play").addEventListener("click", async () => {
   const raw = $("seed").value.trim();
@@ -154,14 +151,12 @@ function faceState(strategy, replica) {
 
 function paintPlayers() {
   for (const strategy of STRATEGIES) {
-    const decision = state.decisions[strategy] ?? null;
     for (const replica of REPLICAS) {
       const drawn = faceState(strategy, replica);
       const art = $(`art-${strategy}-${replica}`);
-      const key = `${drawn}:${decision}`;
-      if (art.dataset.key !== key) {
-        art.dataset.key = key;
-        art.innerHTML = characterSvg(strategy, drawn, decision);
+      if (art.dataset.state !== drawn) {
+        art.dataset.state = drawn;
+        art.innerHTML = characterSvg(strategy, drawn);
       }
       const box = $(`rep-${strategy}-${replica}`);
       box.classList.toggle("gone", drawn === "gone");
@@ -212,15 +207,11 @@ function apply(event) {
   switch (event.kind) {
     case "new-game":
       state.current = { id: event.gameId, a: event.strategyA, b: event.strategyB, next: event.strategyA };
-      // Both players wake up with nothing yet decided this game.
-      state.decisions[event.strategyA] = null;
-      state.decisions[event.strategyB] = null;
       addGameRow(event);
       break;
 
     case "decision":
       fillDecision(event);
-      state.decisions[event.strategy] = event.decision;
       if (state.current && state.current.id === event.gameId) {
         state.current.next = state.current.next === state.current.a ? state.current.b : null;
       }

@@ -20,14 +20,14 @@ const SHAPES = {
   },
 };
 
-// Faces. The mouth encodes one thing and one thing only: the decision. A smile
-// for cooperating, a jagged grin for cheating, a flat line for neither yet.
+// Faces. Two of them: an ordinary one, and the flat grin a killed or quarantined
+// replica wears so a dead character reads as dead at a glance rather than only by
+// its dimmed colour.
 //
-// Three expressions, no more. Whose turn it is and whether a replica is alive are
-// different facts and are shown differently -- by the card highlight and by how
-// solid the character is drawn -- so the mouth stays a reliable read of what was
-// actually decided rather than a mix of several signals.
-function face(state, decision, eyeY, mouthY) {
+// What a player decided is not on its face. The games table already says, and
+// says it durably -- an expression that lasts as long as a turn is gone before
+// you have finished reading the row it belongs to.
+function face(state, eyeY, mouthY) {
   if (state === "gone") {
     return `
       <path d="M20 ${eyeY - 3} l8 7 M28 ${eyeY - 3} l-8 7" stroke="${INK}" stroke-width="3" stroke-linecap="round" fill="none"/>
@@ -37,26 +37,15 @@ function face(state, decision, eyeY, mouthY) {
   return `
     <circle cx="25" cy="${eyeY}" r="3.6" fill="${INK}"/>
     <circle cx="43" cy="${eyeY}" r="3.6" fill="${INK}"/>
-    ${mouth(decision, mouthY)}`;
+    <path d="M25 ${mouthY + 2} h14" stroke="${INK}" stroke-width="3" stroke-linecap="round" fill="none"/>`;
 }
 
-function mouth(decision, y) {
-  const stroke = `stroke="${INK}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" fill="none"`;
-  if (decision === "cooperate") return `<path d="M24 ${y} q8 8 16 0" ${stroke}/>`;
-  if (decision === "cheat") return `<path d="M23 ${y + 2} l4.5 -4.5 l4.5 4.5 l4.5 -4.5 l4.5 4.5" ${stroke}/>`;
-  return `<path d="M25 ${y + 2} h14" ${stroke}/>`;
-}
-
-// characterSvg renders one replica.
-//
-// state is the replica's situation:
+// characterSvg renders one replica. state is the replica's situation:
 //   idle      - alive, not in the current game (drawn translucent)
 //   awake     - alive and playing this game
 //   deciding  - alive, playing, and it is this strategy's turn
 //   gone      - killed or quarantined
-//
-// decision is the player's last move: "cooperate", "cheat", or null for neither.
-export function characterSvg(strategy, state, decision) {
+export function characterSvg(strategy, state) {
   const shape = SHAPES[strategy] || SHAPES.cooperator;
   const fill = state === "gone" ? "#c8c2cc" : shape.fill;
   const badge = shape.badge
@@ -68,6 +57,6 @@ export function characterSvg(strategy, state, decision) {
         ${shape.body}
       </g>
       ${badge}
-      ${face(state, decision, shape.eyeY || 31, shape.mouthY || 43)}
+      ${face(state, shape.eyeY || 31, shape.mouthY || 43)}
     </svg>`;
 }

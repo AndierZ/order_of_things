@@ -30,6 +30,32 @@ import (
 type Decide func(store *fsm.GameStore, self fsm.Strategy, game *fsm.Game) fsm.Decision
 
 // Player runs one strategy as a component on the sequenced stream.
+//
+// All four strategies share this one implementation because in v1 they genuinely
+// are the same component: each folds the whole global FSM, each is gated by the
+// same turn-taking rule, and the only thing that differs is the decision
+// function. Collapsing them keeps that visible -- the correspondence table is
+// about what each one *reads*, and four near-identical copies of the event loop
+// would bury it.
+//
+// This is expected to stop being true in v2, and this type is the seam to split
+// on when it does. Two reasons it will come apart:
+//
+//   - Watermark tracking stops being uniform. Only CopyLeader needs to know
+//     whether earlier games have resolved; making the others carry that machinery
+//     costs nothing today because it is a single read, but it will not stay a
+//     single read once games run concurrently.
+//   - Not every strategy needs the whole FSM. Cooperate reads nothing at all, so
+//     once the injector stops serializing everything it needs no store beyond
+//     "am I in this game and is it my turn" -- and Flip needs only its own
+//     history, not the leaderboard or other pairs' games. Feeding all of them the
+//     full global state is the v1 shortcut, not the design.
+//
+// When either of those bites, give each strategy its own component with the store
+// it actually depends on, and keep Decide as the shared shape. The point of the
+// project is that the amount of state a component holds should match the amount
+// its decision depends on, so a Cooperator carrying the global leaderboard is
+// exactly the thing the demo argues against.
 type Player struct {
 	self      fsm.Strategy
 	decide    Decide

@@ -18,9 +18,9 @@ const REPLICAS = ["r0", "r1"];
 // view, the more coordination that player costs to run.
 const BLURBS = {
   cooperator: ["always cooperates", "looks at nothing"],
-  flipper: ["flips its own last move", "looks at its own past"],
-  retaliator: ["mirrors this opponent", "looks at this pairing"],
-  "copy-leader": ["copies whoever leads", "looks at every score"],
+  flipper: ["flips its own last move", "looks at itself"],
+  retaliator: ["mirrors this opponent", "looks at the opponent"],
+  "copy-leader": ["copies whoever leads", "looks at everyone"],
 };
 
 const $ = id => document.getElementById(id);

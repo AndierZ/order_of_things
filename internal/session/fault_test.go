@@ -126,32 +126,75 @@ func TestImpureReplicaIsQuarantined(t *testing.T) {
 	}
 }
 
-// A quarantined replica has refused to keep serving; it must not be allowed to
-// rejoin on request either.
-func TestQuarantinedReplicaMayNotRejoin(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+// Quarantine has to be visible the moment it happens, without anyone poking the
+// supervisor. A replica quarantines itself on its own goroutine; if nothing is
+// waiting on that goroutine, the supervisor keeps reporting it healthy until it
+// joins for some unrelated reason -- and then looks like whatever triggered the
+// join is what caused the quarantine.
+func TestSelfQuarantineIsVisibleWithoutBeingPoked(t *testing.T) {
+	s, _ := started(t, session.Config{Seed: 42, Games: 80, Replicas: 2})
 
-	s := session.New(session.Config{
-		Seed: 42, Games: 60, Replicas: 2,
-		Bug: &session.Bug{Component: "flipper", Replica: "r1",
-			Defect: session.Defect{ImpureClock: true}},
+	waitFor(t, "the tournament to get going", func() bool {
+		return s.Tracker().Snapshot().Completed >= 10
 	})
-	result := s.Run(ctx)
+	if err := s.Kill("flipper", "r1"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the tournament to move on", func() bool {
+		return s.Tracker().Snapshot().Completed >= 20
+	})
+	if err := s.RestartWithBug("flipper", "r1", session.Defect{ImpureClock: true}); err != nil {
+		t.Fatal(err)
+	}
 
-	if len(result.Quarantined) != 1 {
-		t.Fatalf("quarantined %v, want exactly one", result.Quarantined)
+	// No Kill, no Wait, no other call that would join the goroutine: the status
+	// has to arrive on its own.
+	waitFor(t, "the defective replica to report itself quarantined", func() bool {
+		got := status(t, s, "flipper", "r1")
+		return got.Quarantined && !got.Running
+	})
+	if got := status(t, s, "flipper", "r1"); got.Killed {
+		t.Error("a replica that quarantined itself is reported as killed")
 	}
-	component, replica := "flipper", "r0"
-	if result.Quarantined[0] == "flipper/r1" {
-		replica = "r1"
+}
+
+// Quarantine refuses a divergent instance, not the name forever. An operator
+// redeploying is entitled to try again -- and the fresh instance has to earn its
+// place by replaying correctly, like any other.
+func TestQuarantinedReplicaCanBeRedeployedClean(t *testing.T) {
+	s, _ := started(t, session.Config{Seed: 42, Games: 80, Replicas: 2, Reference: reference(t, 42, 80)})
+
+	waitFor(t, "the tournament to get going", func() bool {
+		return s.Tracker().Snapshot().Completed >= 10
+	})
+	if err := s.Kill("flipper", "r1"); err != nil {
+		t.Fatal(err)
 	}
-	err := s.Restart(component, replica)
-	if err == nil {
-		t.Fatal("a quarantined replica was allowed to rejoin")
+	waitFor(t, "the tournament to move on", func() bool {
+		return s.Tracker().Snapshot().Completed >= 20
+	})
+	if err := s.RestartWithBug("flipper", "r1", session.Defect{CorruptPayoff: true}); err != nil {
+		t.Fatal(err)
 	}
-	if got := status(t, s, component, replica); !got.Quarantined {
-		t.Error("quarantined replica is not reported as quarantined")
+	waitFor(t, "the defective replica to be refused", func() bool {
+		return status(t, s, "flipper", "r1").Quarantined
+	})
+
+	// Redeploy it clean. It replays, passes, and rejoins.
+	if err := s.Restart("flipper", "r1"); err != nil {
+		t.Fatalf("a quarantined replica could not be redeployed: %v", err)
+	}
+	got := status(t, s, "flipper", "r1")
+	if got.Quarantined || got.Killed || !got.Running {
+		t.Fatalf("after a clean redeploy: %+v, want running and clear", got)
+	}
+
+	result := s.Wait()
+	if result.Games != 80 {
+		t.Errorf("completed %d of 80 games", result.Games)
+	}
+	if len(result.Quarantined) != 0 {
+		t.Errorf("the redeployed replica did not survive: %v", result.Quarantined)
 	}
 }
 

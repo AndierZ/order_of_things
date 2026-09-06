@@ -64,6 +64,9 @@ state correctly. The second is invisible to the pair — a sibling running the s
 defect agrees with it, which is the known limit of active-active. Only a
 reference computed before either replica ran can say which one is wrong.
 
+Quarantine refuses a divergent *instance*, not the name forever: redeploy the
+replica clean and it is let back in, having earned it by replaying correctly.
+
 Both are injectable from the UI, and both name the actually-defective replica,
 because on the replay path a replica is compared against recorded history it
 cannot influence. On the *live* path that is not true: two replicas race, the

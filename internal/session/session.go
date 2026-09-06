@@ -121,8 +121,13 @@ type slot struct {
 	// arbitrated pair, so it is supervised but not fault-injectable.
 	restartable bool
 
-	cancel  context.CancelFunc
-	done    chan error
+	cancel context.CancelFunc
+	// done is closed once this instance has stopped AND its outcome has been
+	// recorded below, so anyone who waits on it sees settled state.
+	done chan struct{}
+	// gen identifies the current instance, so a watcher left over from a previous
+	// one cannot report the death of something that has since been replaced.
+	gen     int
 	running bool
 	// killed and quarantined are the two ways a replica leaves the pair. Killed
 	// is a simulated fault and is recoverable; quarantined means the replica
@@ -284,11 +289,34 @@ func (s *Session) Start(ctx context.Context) {
 
 func (s *Session) startLocked(sl *slot) {
 	ctx, cancel := context.WithCancel(s.ctx)
-	done := make(chan error, 1)
+	done := make(chan struct{})
 	instance := sl.build(sl.defect)
 
-	sl.cancel, sl.done, sl.running, sl.killed = cancel, done, true, false
-	go func() { done <- instance.Run(ctx) }()
+	sl.gen++
+	sl.cancel, sl.done = cancel, done
+	sl.running, sl.killed, sl.quarantined = true, false, false
+	gen := sl.gen
+
+	// Watch it. A replica that quarantines itself does so on its own goroutine,
+	// and with nobody waiting the supervisor would not find out until it happened
+	// to join that goroutine for some unrelated reason -- reporting the replica as
+	// healthy in the meantime, and then appearing to quarantine it in response to
+	// whatever finally did the join.
+	go func() {
+		err := instance.Run(ctx)
+
+		s.mu.Lock()
+		if sl.gen == gen { // not superseded by a restart
+			sl.running = false
+			if err != nil {
+				sl.quarantined = true
+			}
+		}
+		s.mu.Unlock()
+
+		// Closed last, so a waiter that sees this sees the outcome too.
+		close(done)
+	}()
 }
 
 // Wait blocks until the tournament reaches its target or ctx is cancelled, then
@@ -308,21 +336,28 @@ func (s *Session) shutdown() Result {
 	case <-s.ctx.Done():
 	}
 
-	// Stop the components, join every goroutine, then stop the sequencer and read
-	// its log. Joining before reading is what makes those reads safe without
-	// putting a lock on the state itself.
+	// Stop the components, wait for every watcher to record its outcome, then
+	// stop the sequencer and read its log. Joining before reading is what makes
+	// those reads safe without putting a lock on the state itself.
 	s.cancel()
+
+	s.mu.Lock()
+	waits := make([]chan struct{}, 0, len(s.slots))
+	for _, sl := range s.slots {
+		if sl.done != nil {
+			waits = append(waits, sl.done)
+		}
+	}
+	s.mu.Unlock()
+
+	for _, done := range waits {
+		<-done
+	}
 
 	s.mu.Lock()
 	s.finished = true
 	quarantined := make([]string, 0)
 	for _, sl := range s.slots {
-		if sl.running {
-			if err := <-sl.done; err != nil {
-				sl.quarantined = true
-			}
-			sl.running = false
-		}
 		if sl.quarantined {
 			quarantined = append(quarantined, sl.String())
 		}
@@ -363,33 +398,52 @@ func (s *Session) Run(ctx context.Context) Result {
 // stops responding; its sibling carries the component alone.
 func (s *Session) Kill(component, id string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.finished {
+		s.mu.Unlock()
 		return errFinished
 	}
 	sl, err := s.findLocked(component, id)
 	if err != nil {
+		s.mu.Unlock()
 		return err
 	}
 	if !sl.restartable {
+		s.mu.Unlock()
 		return fmt.Errorf("session: %s is not fault-injectable", sl)
 	}
 	if !sl.running {
+		s.mu.Unlock()
 		return fmt.Errorf("session: %s is not running", sl)
 	}
-	sl.cancel()
-	if err := <-sl.done; err != nil {
-		sl.quarantined = true
+	cancel, done := sl.cancel, sl.done
+	s.mu.Unlock()
+
+	// Wait outside the lock: the watcher takes it on the way out, so holding it
+	// here would deadlock against the goroutine being waited on.
+	cancel()
+	<-done
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// A replica that had already quarantined itself is not also "killed" -- it
+	// was gone before the request arrived, and saying so is more useful.
+	if !sl.quarantined {
+		sl.killed = true
 	}
-	sl.running, sl.killed = false, true
 	return nil
 }
 
-// Restart brings a killed replica back as a fresh instance with empty state. It
+// Restart brings a stopped replica back as a fresh instance with empty state. It
 // subscribes, replays the log from the sequencer, and rejoins its pair -- unless
 // its replay disagrees with what the log records or with the canonical chain, in
 // which case it quarantines itself before it can affect anything.
+//
+// A quarantined replica can be restarted. Quarantine refuses a divergent
+// *instance*, not the name forever: an operator redeploying a fixed build is
+// entitled to try again, and the fresh instance has to earn its place by
+// replaying correctly like any other. What it may not do is talk its way back in
+// without being re-checked, and it cannot -- the check is on the replay path and
+// happens whether anyone asked for it or not.
 func (s *Session) Restart(component, id string) error {
 	return s.restart(component, id, Defect{})
 }
@@ -416,9 +470,6 @@ func (s *Session) restart(component, id string, defect Defect) error {
 	}
 	if sl.running {
 		return fmt.Errorf("session: %s is already running", sl)
-	}
-	if sl.quarantined {
-		return fmt.Errorf("session: %s is quarantined and may not rejoin", sl)
 	}
 	sl.defect = defect
 	s.startLocked(sl)

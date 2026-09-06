@@ -169,8 +169,9 @@ func (s *Server) replicaAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		// A refused action is expected, not exceptional: a quarantined replica
-		// may not rejoin, and the UI says so rather than pretending it worked.
+		// A refused action is expected, not exceptional -- killing something that
+		// is already stopped, restarting something already running -- and the UI
+		// says so rather than pretending it worked.
 		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 		return
 	}

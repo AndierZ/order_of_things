@@ -2,23 +2,39 @@ package platform
 
 import (
 	"context"
+	"log"
 
 	"golang.design/x/chann"
 )
-import "log"
+
+// Sequencer is the single admission gate for the whole system. It is
+// deliberately dumb: it knows nothing about games, actors or strategies. It
+// assigns a global sequence number to every admitted event and fans that event
+// out to every subscriber in the same order.
+// subscription is a join or leave request. Membership changes travel as messages
+// on the same channel as everything else, so s.clients is only ever touched by
+// the sequencer's own goroutine and needs no synchronization.
+type subscription struct {
+	client *SequencerClient
+	join   bool
+}
 
 type Sequencer struct {
-	subCh        *chann.Chann[*SequencerClient]
-	ingressCh    *chann.Chann[*Event]
-	clients      []*SequencerClient
-	eventLog     []*Event
-	sequence     int64
+	subCh     *chann.Chann[subscription]
+	ingressCh *chann.Chann[*Event]
+	clients   []*SequencerClient
+	eventLog  []*Event
+	sequence  int64
+	// senderSeqHwm is keyed on SenderComponent, not SenderId. That is what makes
+	// active-active work: both replicas of a component emit the same SenderSeq for
+	// the same logical decision, so the first to arrive is admitted and the second
+	// is dropped as a duplicate. The race is resolved per event, not per replica.
 	senderSeqHwm map[string]int64
 }
 
 func NewSequencer() *Sequencer {
 	return &Sequencer{
-		subCh:        chann.New[*SequencerClient](),
+		subCh:        chann.New[subscription](),
 		ingressCh:    chann.New[*Event](),
 		clients:      make([]*SequencerClient, 0),
 		sequence:     0,
@@ -26,62 +42,109 @@ func NewSequencer() *Sequencer {
 	}
 }
 
+// IngressCh is the channel components publish to. Handed to each component so it
+// can construct its own client.
+func (s *Sequencer) IngressCh() *chann.Chann[*Event] {
+	return s.ingressCh
+}
+
+// Subscribe registers a client to receive the replayed log followed by all
+// subsequent events. Safe to call from any goroutine, including while the
+// sequencer is running.
+func (s *Sequencer) Subscribe(client *SequencerClient) {
+	s.subCh.In() <- subscription{client: client, join: true}
+}
+
+// unsubscribe removes a client. Requests are processed in order with Subscribe,
+// so a join enqueued after a leave is guaranteed to be applied after it.
+func (s *Sequencer) unsubscribe(client *SequencerClient) {
+	s.subCh.In() <- subscription{client: client, join: false}
+}
+
 func (s *Sequencer) Run(ctx context.Context) {
 	log.Println("Sequencer started")
 	for {
+		// The pseudo-random choice between two ready cases is safe here, unlike
+		// inside a state transition: subscription is not part of the logical event
+		// stream. Whichever case wins, a joining client still sees every admitted
+		// event exactly once -- either as part of its replay or as a live fanout,
+		// never both and never neither.
 		select {
 		case <-ctx.Done():
 			log.Println("Sequencer exited")
 			return
-		case client := <-s.subCh.Out():
-			s.clients = append(s.clients, client)
-			// replay
-			for _, event := range s.eventLog {
-				client.onSequencerEvent(event)
-			}
-			client.onReplayComplete()
-		case event := <-s.ingressCh.Out():
-			if !s.isValid(event) {
+		case sub := <-s.subCh.Out():
+			if !sub.join {
+				s.dropClient(sub.client)
 				continue
 			}
-			s.eventLog = append(s.eventLog, event)
-			// sequence
-			event.Header.Seq = s.sequence
-			s.sequence++
-
-			// fanout
-			closedClients := make(map[string]struct{})
-			for _, client := range s.clients {
-				if client.isClosed() {
-					closedClients[client.senderComponentId] = struct{}{}
-				} else {
-					client.onSequencerEvent(event)
-				}
+			s.clients = append(s.clients, sub.client)
+			for _, event := range s.eventLog {
+				sub.client.onSequencerEvent(event)
+			}
+			sub.client.onReplayComplete()
+		case event := <-s.ingressCh.Out():
+			if !s.admit(event) {
+				continue
 			}
 
-			// cleanup closed clients
-			if len(closedClients) > 0 {
-				remainingClients := make([]*SequencerClient, 0)
-				for _, client := range s.clients {
-					if _, ok := closedClients[client.senderComponentId]; !ok {
-						remainingClients = append(remainingClients, client)
-					}
-				}
+			// Sequence onto a copy. The sender still holds the original as its
+			// inflight event, so mutating it here would be a data race and would
+			// let one component's bookkeeping be rewritten by another goroutine.
+			sequenced := &Event{
+				Header:  event.Header,
+				Payload: event.Payload,
+			}
+			sequenced.Header.Seq = s.sequence
+			s.sequence++
+			s.eventLog = append(s.eventLog, sequenced)
 
-				s.clients = remainingClients
+			for _, client := range s.clients {
+				client.onSequencerEvent(sequenced)
 			}
 		}
 	}
 }
 
-func (s *Sequencer) isValid(event *Event) bool {
-	hwm, ok := s.senderSeqHwm[event.Header.SenderComponent]
-	if !ok || event.Header.SenderSeq == hwm+1 {
-		s.senderSeqHwm[event.Header.SenderComponent] = event.Header.SenderSeq
-		return true
+// Sequence returns the number of events admitted so far. Only safe to call once
+// the sequencer has stopped.
+func (s *Sequencer) Sequence() int64 {
+	return s.sequence
+}
+
+// EventLog returns the admitted events in order. Only safe to call once the
+// sequencer has stopped; used by tests and by golden-outcome comparison.
+func (s *Sequencer) EventLog() []*Event {
+	return s.eventLog
+}
+
+// admit applies the per-component duplicate and gap check, and advances the
+// high-water mark only for events it accepts.
+func (s *Sequencer) admit(event *Event) bool {
+	hwm, seen := s.senderSeqHwm[event.Header.SenderComponent]
+	switch {
+	case !seen && event.Header.SenderSeq == 0:
+	case seen && event.Header.SenderSeq == hwm+1:
+	case seen && event.Header.SenderSeq <= hwm:
+		// The sibling replica already won this position. Expected in active-active.
+		return false
+	default:
+		log.Printf(
+			"sequencer: gap from component %q replica %q: got senderSeq %d, expected %d",
+			event.Header.SenderComponent, event.Header.SenderId,
+			event.Header.SenderSeq, hwm+1,
+		)
+		return false
 	}
-	if event.Header.SenderSeq > hwm+1 {
-		log.Println("Received sender sequence with gap")
+	s.senderSeqHwm[event.Header.SenderComponent] = event.Header.SenderSeq
+	return true
+}
+
+func (s *Sequencer) dropClient(client *SequencerClient) {
+	for i, subscribed := range s.clients {
+		if subscribed == client {
+			s.clients = append(s.clients[:i], s.clients[i+1:]...)
+			return
+		}
 	}
-	return false
 }

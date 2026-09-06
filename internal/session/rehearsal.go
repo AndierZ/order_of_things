@@ -34,8 +34,16 @@ func (e *RehearsalError) Error() string {
 //
 // Rehearsing against the whole canonical tournament closes that: a defect that
 // would ever show up has to show up here, where the candidate is talking to
-// nobody and can be refused for free. It is what "verification before trust"
-// has to mean if the trust is worth anything.
+// nobody and can be refused for free.
+//
+// Worth being honest about what this needs, because it is not a live mechanism.
+// A latent decision bug cannot be caught at rejoin time by any means -- it has
+// not happened yet -- so the only way to catch it is to ask a question whose
+// answer is already known, and production has no canonical future to ask about.
+// Where this check belongs in a real system is before deployment: replay a
+// recorded trace against the new build and refuse to ship it if it diverges,
+// which is what deterministic simulation testing is. Determinism plus a recorded
+// trace is what makes having a known answer possible at all.
 func rehearse(candidate component, replica string, reference *golden.Validator) error {
 	log := reference.Log()
 	if len(log) == 0 {

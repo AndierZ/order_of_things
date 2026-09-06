@@ -34,11 +34,12 @@ beyond the order of the log.
 No snapshots, no state transfer, no catch-up protocol — it re-derives the past
 from the same events everyone else saw.
 
-**Verification before trust.** This is the part that makes it a debugger. A
-recovering replica replays the *entire* canonical tournament in private — every
-event, every emission, every state root — before it is connected to anything, and
-is refused readmission if it diverges anywhere. Not "we noticed later" — refused
-at the door, at the exact event where it first went wrong:
+**Verification before trust.** This is the part that makes it a debugger rather
+than a runtime, and it is worth being exact about what it needs. A candidate
+replica replays the *entire* canonical tournament in private — every event, every
+emission, every state root — before it is connected to anything, and is refused
+if it diverges anywhere. Not "we noticed later" — refused at the door, at the
+exact event where it first went wrong:
 
 ```
 Rehearsal refused: session: flipper/r1 failed rehearsal at seq 7:
@@ -50,9 +51,27 @@ corrupted decision function looks perfect until it is asked to decide, and the
 history a replica happens to rejoin against may never have asked it. Let such a
 replica through and it wins a race, its wrong answer enters the log, and the
 *healthy* sibling is the one that disagrees with the record and quarantines —
-after which every later restart is refused for disagreeing too. Rehearsing
-against the whole canonical tournament closes that, because a defect that would
-ever show up has to show up while the candidate is still talking to nobody.
+after which every later restart is refused for disagreeing too.
+
+Which leads to the honest limit, and it is a real one: **you cannot catch a
+latent decision bug at rejoin time by any mechanism, because the bug has not
+happened yet.** You can only catch it by asking the candidate a question you
+already know the answer to. Production has no canonical future to ask about, so
+this particular check cannot live at a live rejoin gate anywhere — here or
+elsewhere. Where it does live is before deployment: replay a recorded trace
+against the new build and refuse to ship it if it diverges. That is deterministic
+simulation testing, and it is what FoundationDB's simulator, TigerBeetle's VOPR
+and Antithesis are all doing. Determinism plus a recorded trace is what makes
+having a known answer possible at all.
+
+The three checks in this project need quite different things, and only two of
+them generalise to a running system:
+
+| check | needs | catches | live? |
+|---|---|---|---|
+| emission comparison | a live sibling | that they disagreed — never which is wrong | yes |
+| state root vs. the log so far | a reference for the past | a corrupted transition function | yes |
+| rehearsal vs. the canonical run | a recorded canonical trace | anything that would ever diverge | no — pre-deployment |
 
 **Cheap redundancy.** Active-active is normally hard: you cannot re-run
 side-effecting code twice and reconcile the results. It is trivial here precisely

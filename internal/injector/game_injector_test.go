@@ -1,4 +1,4 @@
-package tracker
+package injector
 
 import (
 	"testing"
@@ -9,9 +9,9 @@ import (
 
 func TestPairingNeverPitsAStrategyAgainstItself(t *testing.T) {
 	for _, seed := range []int64{0, 1, 42, -7, 1 << 40} {
-		tracker := &GameTracker{seed: seed}
+		injector := &GameInjector{seed: seed}
 		for id := int64(0); id < 10000; id++ {
-			a, b := tracker.pairing(id)
+			a, b := injector.pairing(id)
 			if a == b {
 				t.Fatalf("seed %d game %d paired %q against itself", seed, id, a)
 			}
@@ -20,16 +20,16 @@ func TestPairingNeverPitsAStrategyAgainstItself(t *testing.T) {
 }
 
 func TestPairingIsAPureFunctionOfSeedAndPosition(t *testing.T) {
-	tracker := &GameTracker{seed: 42}
+	injector := &GameInjector{seed: 42}
 	want := make(map[int64][2]fsm.Strategy)
 	for id := int64(0); id < 500; id++ {
-		a, b := tracker.pairing(id)
+		a, b := injector.pairing(id)
 		want[id] = [2]fsm.Strategy{a, b}
 	}
 
 	// A replica that computes pairings out of order, or that computes the same one
 	// twice, must get identical answers -- it carries no generator state.
-	fresh := &GameTracker{seed: 42}
+	fresh := &GameInjector{seed: 42}
 	for id := int64(499); id >= 0; id-- {
 		for repeat := 0; repeat < 3; repeat++ {
 			a, b := fresh.pairing(id)
@@ -41,11 +41,11 @@ func TestPairingIsAPureFunctionOfSeedAndPosition(t *testing.T) {
 }
 
 func TestPairingUsesEveryStrategy(t *testing.T) {
-	tracker := &GameTracker{seed: 42}
+	injector := &GameInjector{seed: 42}
 	appearances := make(map[fsm.Strategy]int)
 	const games = 4000
 	for id := int64(0); id < games; id++ {
-		a, b := tracker.pairing(id)
+		a, b := injector.pairing(id)
 		appearances[a]++
 		appearances[b]++
 	}
@@ -59,7 +59,7 @@ func TestPairingUsesEveryStrategy(t *testing.T) {
 }
 
 func TestDifferentSeedsGiveDifferentSchedules(t *testing.T) {
-	a, b := &GameTracker{seed: 42}, &GameTracker{seed: 43}
+	a, b := &GameInjector{seed: 42}, &GameInjector{seed: 43}
 	same := 0
 	const games = 200
 	for id := int64(0); id < games; id++ {
@@ -74,8 +74,8 @@ func TestDifferentSeedsGiveDifferentSchedules(t *testing.T) {
 	}
 }
 
-func newTracker(seed int64, maxGames int) *GameTracker {
-	return &GameTracker{seed: seed, maxGames: maxGames, gameStore: fsm.NewGameStore()}
+func newInjector(seed int64, maxGames int) *GameInjector {
+	return &GameInjector{seed: seed, maxGames: maxGames, gameStore: fsm.NewGameStore()}
 }
 
 func marker() *platform.Event {
@@ -86,8 +86,8 @@ func sequenced(seq int64, payload any) *platform.Event {
 	return &platform.Event{Header: platform.Header{Seq: seq}, Payload: payload}
 }
 
-func TestTrackerBootstrapsOnlyAnEmptyStream(t *testing.T) {
-	cold := newTracker(42, 0)
+func TestInjectorBootstrapsOnlyAnEmptyStream(t *testing.T) {
+	cold := newInjector(42, 0)
 	out := cold.HandleEvent(marker())
 	genesis, ok := out.(fsm.NewGame)
 	if !ok {
@@ -98,28 +98,28 @@ func TestTrackerBootstrapsOnlyAnEmptyStream(t *testing.T) {
 	}
 
 	// A replica joining a tournament already in progress must not inject a game.
-	joining := newTracker(42, 0)
+	joining := newInjector(42, 0)
 	joining.HandleEvent(sequenced(0, genesis))
 	if out := joining.HandleEvent(marker()); out != nil {
 		t.Errorf("replica joining mid-tournament emitted %#v, want nothing", out)
 	}
 }
 
-func TestTrackerInjectsTheNextGameOnlyOnCompletion(t *testing.T) {
-	tracker := newTracker(42, 0)
-	genesis := tracker.HandleEvent(marker()).(fsm.NewGame)
-	if out := tracker.HandleEvent(sequenced(0, genesis)); out != nil {
+func TestInjectorInjectsTheNextGameOnlyOnCompletion(t *testing.T) {
+	injector := newInjector(42, 0)
+	genesis := injector.HandleEvent(marker()).(fsm.NewGame)
+	if out := injector.HandleEvent(sequenced(0, genesis)); out != nil {
 		t.Fatalf("emitted %#v on admitting a game, want nothing", out)
 	}
 
-	first := tracker.HandleEvent(sequenced(1, fsm.GameDecision{
+	first := injector.HandleEvent(sequenced(1, fsm.GameDecision{
 		Strategy: genesis.StrategyA, Decision: fsm.Cooperate,
 	}))
 	if first != nil {
 		t.Fatalf("emitted %#v on the first decision, want nothing", first)
 	}
 
-	out := tracker.HandleEvent(sequenced(2, fsm.GameDecision{
+	out := injector.HandleEvent(sequenced(2, fsm.GameDecision{
 		Strategy: genesis.StrategyB, Decision: fsm.Cheat,
 	}))
 	next, ok := out.(fsm.NewGame)
@@ -131,25 +131,25 @@ func TestTrackerInjectsTheNextGameOnlyOnCompletion(t *testing.T) {
 	}
 }
 
-func TestTrackerStopsInjectingAtMaxGames(t *testing.T) {
-	tracker := newTracker(42, 2)
+func TestInjectorStopsInjectingAtMaxGames(t *testing.T) {
+	injector := newInjector(42, 2)
 	seq := int64(0)
-	next := tracker.HandleEvent(marker())
+	next := injector.HandleEvent(marker())
 
 	for played := 0; played < 2; played++ {
 		game := next.(fsm.NewGame)
-		tracker.HandleEvent(sequenced(seq, game))
+		injector.HandleEvent(sequenced(seq, game))
 		seq++
-		tracker.HandleEvent(sequenced(seq, fsm.GameDecision{Strategy: game.StrategyA, Decision: fsm.Cooperate}))
+		injector.HandleEvent(sequenced(seq, fsm.GameDecision{Strategy: game.StrategyA, Decision: fsm.Cooperate}))
 		seq++
-		next = tracker.HandleEvent(sequenced(seq, fsm.GameDecision{Strategy: game.StrategyB, Decision: fsm.Cooperate}))
+		next = injector.HandleEvent(sequenced(seq, fsm.GameDecision{Strategy: game.StrategyB, Decision: fsm.Cooperate}))
 		seq++
 	}
 
 	if next != nil {
 		t.Fatalf("emitted %#v after reaching maxGames, want nothing", next)
 	}
-	if got := len(tracker.gameStore.CompletedGames()); got != 2 {
+	if got := len(injector.gameStore.CompletedGames()); got != 2 {
 		t.Errorf("completed %d games, want 2", got)
 	}
 }

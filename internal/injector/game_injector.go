@@ -1,4 +1,4 @@
-package tracker
+package injector
 
 import (
 	"context"
@@ -7,32 +7,39 @@ import (
 	"order_of_things/internal/platform"
 )
 
-// Component is the sequencer-level component name for the tracker. Both replicas
-// of the tracker share it; that is the key the sequencer deduplicates on.
-const Component = "game-tracker"
+// Component is the sequencer-level component name for the injector. Both
+// replicas share it; that is the key the sequencer deduplicates on.
+const Component = "game-injector"
 
-// GameTracker owns two jobs that the design doc eventually separates: the
-// admission policy (when may the next game be injected) and the scores state
-// machine. In v1 the admission policy is trivially "when the previous game has
-// fully resolved", so there is never more than one game in flight and global
-// total ordering holds by construction.
-type GameTracker struct {
+// GameInjector owns the admission policy: when it is safe to put the next game
+// onto the stream. It is the only component that differs between v1 and v2.
+//
+// The v1 policy is that a game may be admitted once the previous one has fully
+// resolved, so there is never more than one game in flight and global total
+// ordering holds by construction. The v2 policy will instead track each strategy
+// as busy or free and admit any game whose participants are both free, which
+// lets disjoint pairs run concurrently. Neither the sequencer nor any strategy
+// FSM has to change for that.
+//
+// It keeps a GameStore purely to know when a game has resolved and what the next
+// game id is. Scores are the tracker's business, not the injector's.
+type GameInjector struct {
 	seed      int64
 	maxGames  int
 	eventloop *platform.Eventloop
 	gameStore *fsm.GameStore
 }
 
-// NewGameTracker builds a tracker replica. seed makes the pairing schedule
+// NewGameInjector builds an injector replica. seed makes the pairing schedule
 // reproducible: it is the single injectable source of entropy for the whole
 // system. maxGames bounds the tournament; 0 runs forever.
-func NewGameTracker(
+func NewGameInjector(
 	replicaId string,
 	seed int64,
 	maxGames int,
 	sequencer *platform.Sequencer,
-) *GameTracker {
-	t := &GameTracker{
+) *GameInjector {
+	t := &GameInjector{
 		seed:      seed,
 		maxGames:  maxGames,
 		gameStore: fsm.NewGameStore(),
@@ -46,17 +53,23 @@ func NewGameTracker(
 	return t
 }
 
-func (t *GameTracker) Run(ctx context.Context) error {
+func (t *GameInjector) Run(ctx context.Context) error {
 	return t.eventloop.Run(ctx)
 }
 
-// GameStore exposes the tracker's materialized state. Only safe to read once the
-// tracker's event loop has stopped.
-func (t *GameTracker) GameStore() *fsm.GameStore {
+// GameStore exposes the injector's materialized state. Only safe to read once
+// its event loop has stopped.
+func (t *GameInjector) GameStore() *fsm.GameStore {
 	return t.gameStore
 }
 
-func (t *GameTracker) HandleEvent(e *platform.Event) any {
+// StateHash is the chained state root as of the last event this replica applied.
+// Only safe once its event loop has stopped.
+func (t *GameInjector) StateHash() uint64 {
+	return t.gameStore.StateHash()
+}
+
+func (t *GameInjector) HandleEvent(e *platform.Event) any {
 	if e.IsReplayComplete() {
 		// Bootstrap the stream, but only if it is genuinely empty. A replica that
 		// joined a tournament already in progress has nothing to bootstrap.
@@ -76,14 +89,14 @@ func (t *GameTracker) HandleEvent(e *platform.Event) any {
 }
 
 // newGame draws the next pairing.
-func (t *GameTracker) newGame() fsm.NewGame {
+func (t *GameInjector) newGame() fsm.NewGame {
 	id := t.gameStore.NextGameId()
 	a, b := t.pairing(id)
 	return fsm.NewGame{Id: id, StrategyA: a, StrategyB: b}
 }
 
 // pairing is a pure function of the session seed and the game's position in the
-// stream. There is deliberately no PRNG object anywhere in the tracker.
+// stream. There is deliberately no PRNG object anywhere in the injector.
 //
 // A stateful generator would be a second, hidden source of entropy that the seed
 // does not actually govern: it is advanced by *emissions*, and replicas do not
@@ -93,7 +106,7 @@ func (t *GameTracker) newGame() fsm.NewGame {
 // which is invariant 1 breaking, even though every individual draw was "seeded".
 // Deriving the pairing from (seed, gameId) instead means any replica can compute
 // any game's pairing at any time, having observed nothing but the log.
-func (t *GameTracker) pairing(gameId int64) (fsm.Strategy, fsm.Strategy) {
+func (t *GameInjector) pairing(gameId int64) (fsm.Strategy, fsm.Strategy) {
 	n := uint64(len(fsm.AllStrategies))
 	h := mix(uint64(t.seed) ^ mix(uint64(gameId)))
 

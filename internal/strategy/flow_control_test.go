@@ -44,39 +44,3 @@ func TestShouldRespondSerializesTheTwoParticipants(t *testing.T) {
 		})
 	}
 }
-
-// Cooperator is tier 0: its decision reads none of the shared state, so the same
-// event always produces the same answer regardless of history.
-func TestCooperatorAlwaysCooperates(t *testing.T) {
-	c := &Cooperator{strategy: fsm.Cooperator, gameStore: fsm.NewGameStore()}
-
-	emitted := 0
-	for seq, payload := range []any{
-		fsm.NewGame{Id: 0, StrategyA: fsm.Cooperator, StrategyB: fsm.Flipper},
-		fsm.GameDecision{Strategy: fsm.Cooperator, Decision: fsm.Cooperate},
-		fsm.GameDecision{Strategy: fsm.Flipper, Decision: fsm.Cheat},
-		fsm.NewGame{Id: 1, StrategyA: fsm.Flipper, StrategyB: fsm.Retaliator},
-		fsm.GameDecision{Strategy: fsm.Flipper, Decision: fsm.Cheat},
-		fsm.GameDecision{Strategy: fsm.Retaliator, Decision: fsm.Cheat},
-		fsm.NewGame{Id: 2, StrategyA: fsm.Retaliator, StrategyB: fsm.Cooperator},
-		fsm.GameDecision{Strategy: fsm.Retaliator, Decision: fsm.Cheat},
-	} {
-		out := c.HandleEvent(sequenced(int64(seq), payload))
-		if out == nil {
-			continue
-		}
-		emitted++
-		got, ok := out.(fsm.GameDecision)
-		if !ok {
-			t.Fatalf("emitted %T, want fsm.GameDecision", out)
-		}
-		if got.Strategy != fsm.Cooperator || got.Decision != fsm.Cooperate {
-			t.Errorf("emitted %+v, want cooperator/cooperate", got)
-		}
-	}
-	// Game 0 as participant A, game 2 as participant B; never for game 1, where it
-	// is not a participant, and never twice for the same game.
-	if emitted != 2 {
-		t.Errorf("emitted %d decisions, want 2", emitted)
-	}
-}

@@ -51,6 +51,7 @@ type GameStore struct {
 	completedGames []*Game
 	nextGameId     int64
 	appliedSeq     int64
+	stateHash      uint64
 }
 
 func NewGameStore() *GameStore {
@@ -60,6 +61,7 @@ func NewGameStore() *GameStore {
 		completedGames: make([]*Game, 0),
 		nextGameId:     0,
 		appliedSeq:     -1,
+		stateHash:      offset64,
 	}
 }
 
@@ -67,6 +69,7 @@ func NewGameStore() *GameStore {
 // this event completed, or nil if no game completed.
 func (g *GameStore) ApplyEvent(seq int64, payload any) *Game {
 	g.appliedSeq = seq
+	defer g.rehash()
 
 	switch v := payload.(type) {
 	case NewGame:
@@ -189,9 +192,87 @@ func (g *GameStore) LeadingStrategy() Strategy {
 	if len(g.completedGames) == 0 {
 		return ""
 	}
+	return leaderOf(g.leaderboard)
+}
+
+// LeaderboardEntry is one row of the ranked leaderboard.
+type LeaderboardEntry struct {
+	Strategy Strategy `json:"strategy"`
+	Score    int      `json:"score"`
+}
+
+// Leaderboard returns every strategy that has played, ranked by score descending
+// and then by name ascending. The ordering is total and deterministic.
+func (g *GameStore) Leaderboard() []LeaderboardEntry {
+	return rank(g.leaderboard)
+}
+
+// The three methods below are the watermark mechanism. There is no separate
+// watermark component: it is a property of how the store is read.
+//
+// Every component folds the same ordered stream into its own copy of this state
+// machine, so "the tracker" a strategy consults is simply its own store, and the
+// blocking query the design doc describes becomes a read scoped to a point in the
+// stream. In v1 that scoping is a no-op -- only one game is ever in flight, so
+// everything below the current game has already resolved. It earns its keep in
+// v2, where disjoint games run concurrently and the newest view of the scores can
+// legitimately be missing the outcome of a game admitted earlier than this one.
+
+// ResolvedBefore reports whether every game admitted before seq has completed.
+//
+// This is the watermark check. When it is false, a strategy whose decision
+// depends on the scores must wait rather than decide: the past it is reading is
+// incomplete, and what it is missing depends on which games happened to finish
+// first in real time.
+func (g *GameStore) ResolvedBefore(seq int64) bool {
+	return g.currentGame == nil || g.currentGame.Seq >= seq
+}
+
+// LeaderBefore returns the highest-scoring strategy counting only games admitted
+// before seq, with the same deterministic tie-break as LeadingStrategy. It
+// returns "" if no game had resolved by that point.
+//
+// Callers should check ResolvedBefore first; this method answers from what it
+// has, which is exactly the unsafe read when used on its own.
+func (g *GameStore) LeaderBefore(seq int64) Strategy {
+	scores := make(map[Strategy]int)
+	for _, game := range g.completedGames {
+		// Filter rather than stop early: completedGames is in completion order,
+		// which equals admission order in v1 but will not in v2.
+		if game.Seq >= seq {
+			continue
+		}
+		scores[game.StrategyA] += game.PayoffA
+		scores[game.StrategyB] += game.PayoffB
+	}
+	return leaderOf(scores)
+}
+
+// LastDecisionBefore returns s's most recent decision among games admitted before
+// seq, and false if it had not played by that point.
+func (g *GameStore) LastDecisionBefore(s Strategy, seq int64) (Decision, bool) {
+	// "Most recent" means latest by admission sequence, not last to finish.
+	var latest *Game
+	for _, game := range g.completedGames {
+		if game.Seq >= seq || game.Decision(s) == nil {
+			continue
+		}
+		if latest == nil || game.Seq > latest.Seq {
+			latest = game
+		}
+	}
+	if latest == nil {
+		return Unknown, false
+	}
+	return *latest.Decision(s), true
+}
+
+// leaderOf ranks a score map deterministically. Ranging a map to find a maximum
+// would make the answer depend on Go's randomized iteration order.
+func leaderOf(scores map[Strategy]int) Strategy {
 	best := Strategy("")
 	bestScore := 0
-	for _, entry := range g.Leaderboard() {
+	for _, entry := range rank(scores) {
 		if best == "" || entry.Score > bestScore {
 			best, bestScore = entry.Strategy, entry.Score
 		}
@@ -199,17 +280,9 @@ func (g *GameStore) LeadingStrategy() Strategy {
 	return best
 }
 
-// LeaderboardEntry is one row of the ranked leaderboard.
-type LeaderboardEntry struct {
-	Strategy Strategy
-	Score    int
-}
-
-// Leaderboard returns every strategy that has played, ranked by score descending
-// and then by name ascending. The ordering is total and deterministic.
-func (g *GameStore) Leaderboard() []LeaderboardEntry {
-	entries := make([]LeaderboardEntry, 0, len(g.leaderboard))
-	for strategy, score := range g.leaderboard {
+func rank(scores map[Strategy]int) []LeaderboardEntry {
+	entries := make([]LeaderboardEntry, 0, len(scores))
+	for strategy, score := range scores {
 		entries = append(entries, LeaderboardEntry{Strategy: strategy, Score: score})
 	}
 	sort.Slice(entries, func(i, j int) bool {
@@ -219,4 +292,71 @@ func (g *GameStore) Leaderboard() []LeaderboardEntry {
 		return entries[i].Strategy < entries[j].Strategy
 	})
 	return entries
+}
+
+// State hashing. A replica that restarts replays the log and chains a hash of its
+// materialized state at every step; comparing that chain against a replica that
+// stayed up -- or against a stored golden outcome -- decides whether it is safe
+// to let it rejoin. This mirrors state-root verification in replicated ledgers,
+// where a node proves it computed the same state before it is trusted.
+//
+// It is a chain rather than a hash of the final state on purpose. Two replicas
+// that end up in the same place having disagreed along the way are still a bug,
+// and a chain catches that; a snapshot hash would not.
+
+const (
+	offset64 = 14695981039346656037
+	prime64  = 1099511628211
+)
+
+// StateHash is the chained state root as of the last applied event.
+func (g *GameStore) StateHash() uint64 { return g.stateHash }
+
+// rehash folds a hash of the current materialized state into the chain. Only
+// derived state is included, and the leaderboard is walked in ranked order --
+// hashing a Go map by iteration would make the digest itself nondeterministic,
+// which would be a spectacular way to fail the check it exists to perform.
+func (g *GameStore) rehash() {
+	h := g.stateHash
+	h = writeUint(h, uint64(g.appliedSeq))
+	h = writeUint(h, uint64(g.nextGameId))
+	h = writeUint(h, uint64(len(g.completedGames)))
+
+	if game := g.currentGame; game != nil {
+		h = writeUint(h, uint64(game.Id))
+		h = writeUint(h, uint64(game.Seq))
+		h = writeString(h, string(game.StrategyA))
+		h = writeString(h, string(game.StrategyB))
+		h = writeDecision(h, game.DecisionA)
+		h = writeDecision(h, game.DecisionB)
+	} else {
+		h = writeUint(h, 0)
+	}
+
+	for _, entry := range g.Leaderboard() {
+		h = writeString(h, string(entry.Strategy))
+		h = writeUint(h, uint64(entry.Score))
+	}
+	g.stateHash = h
+}
+
+func writeUint(h, v uint64) uint64 {
+	for i := 0; i < 8; i++ {
+		h = (h ^ (v >> (i * 8) & 0xff)) * prime64
+	}
+	return h
+}
+
+func writeString(h uint64, s string) uint64 {
+	for i := 0; i < len(s); i++ {
+		h = (h ^ uint64(s[i])) * prime64
+	}
+	return (h ^ 0xff) * prime64
+}
+
+func writeDecision(h uint64, d *Decision) uint64 {
+	if d == nil {
+		return writeUint(h, 0)
+	}
+	return writeUint(h, uint64(*d)+1)
 }

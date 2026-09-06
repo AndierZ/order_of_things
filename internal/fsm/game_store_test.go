@@ -293,3 +293,126 @@ func TestReplayReproducesIdenticalState(t *testing.T) {
 		t.Error("store cursors differ")
 	}
 }
+
+// The state root is what a restarting replica is checked against, so it has to
+// distinguish any two histories that should not be considered equivalent.
+func TestStateHashAdvancesWithTheStream(t *testing.T) {
+	store := NewGameStore()
+	seen := map[uint64]bool{store.StateHash(): true}
+
+	seq := int64(0)
+	for i := 0; i < 20; i++ {
+		for _, payload := range []any{
+			NewGame{Id: int64(i), StrategyA: Cooperator, StrategyB: Flipper},
+			GameDecision{Strategy: Cooperator, Decision: Cooperate},
+			GameDecision{Strategy: Flipper, Decision: Cheat},
+		} {
+			store.ApplyEvent(seq, payload)
+			seq++
+			if hash := store.StateHash(); seen[hash] {
+				t.Fatalf("state root %016x repeated at seq %d", hash, seq)
+			} else {
+				seen[hash] = true
+			}
+		}
+	}
+}
+
+func TestIdenticalHistoriesProduceIdenticalStateRoots(t *testing.T) {
+	history := []any{
+		NewGame{Id: 0, StrategyA: Cooperator, StrategyB: Flipper},
+		GameDecision{Strategy: Cooperator, Decision: Cooperate},
+		GameDecision{Strategy: Flipper, Decision: Cheat},
+		NewGame{Id: 1, StrategyA: Retaliator, StrategyB: CopyLeader},
+		GameDecision{Strategy: Retaliator, Decision: Cheat},
+		GameDecision{Strategy: CopyLeader, Decision: Cheat},
+	}
+	live, replayed := NewGameStore(), NewGameStore()
+	apply(live, history...)
+	apply(replayed, history...)
+
+	if live.StateHash() != replayed.StateHash() {
+		t.Errorf("replay produced state root %016x, live has %016x", replayed.StateHash(), live.StateHash())
+	}
+	// And it is stable across repeated computation, not just within one run.
+	for i := 0; i < 100; i++ {
+		if live.StateHash() != replayed.StateHash() {
+			t.Fatalf("state roots diverged on read %d", i)
+		}
+	}
+}
+
+// A divergent transition anywhere in the history has to show up, including one
+// that lands on the same final scores.
+func TestStateHashCatchesDivergenceThatEndsInTheSamePlace(t *testing.T) {
+	honest := NewGameStore()
+	playGame(honest, 0, Cooperator, Flipper, Cooperate, Cheat) // -1 / +3
+	playGame(honest, 1, Cooperator, Flipper, Cheat, Cooperate) // +3 / -1
+
+	// Same two games, same final scores, opposite order.
+	diverged := NewGameStore()
+	playGame(diverged, 0, Cooperator, Flipper, Cheat, Cooperate)
+	playGame(diverged, 1, Cooperator, Flipper, Cooperate, Cheat)
+
+	if !reflect.DeepEqual(honest.Leaderboard(), diverged.Leaderboard()) {
+		t.Fatal("test setup: the two histories should end on the same scores")
+	}
+	if honest.StateHash() == diverged.StateHash() {
+		t.Error("two different histories produced the same state root")
+	}
+}
+
+// playGameAt runs a game at explicit stream positions. The playGame helper above
+// restarts numbering at zero per call, which is fine for tests that only care
+// about scores but useless for anything about sequence scoping.
+func playGameAt(store *GameStore, seq int64, a, b Strategy, da, db Decision) int64 {
+	store.ApplyEvent(seq, NewGame{Id: seq, StrategyA: a, StrategyB: b})
+	store.ApplyEvent(seq+1, GameDecision{Strategy: a, Decision: da})
+	store.ApplyEvent(seq+2, GameDecision{Strategy: b, Decision: db})
+	return seq + 3
+}
+
+func TestWatermarkScopedReads(t *testing.T) {
+	store := NewGameStore()
+	playGameAt(store, 0, Flipper, Cooperator, Cheat, Cooperate) // seq 0-2: flipper +3
+	playGameAt(store, 3, Retaliator, CopyLeader, Cheat, Cheat)  // seq 3-5: nobody scores
+
+	t.Run("scopes the leader to a point in the stream", func(t *testing.T) {
+		if got := store.LeaderBefore(0); got != "" {
+			t.Errorf("LeaderBefore(0) = %q, want empty", got)
+		}
+		if got := store.LeaderBefore(3); got != Flipper {
+			t.Errorf("LeaderBefore(3) = %q, want flipper", got)
+		}
+		if got := store.LeaderBefore(99); got != Flipper {
+			t.Errorf("LeaderBefore(99) = %q, want flipper", got)
+		}
+	})
+
+	t.Run("scopes decisions to a point in the stream", func(t *testing.T) {
+		if _, ok := store.LastDecisionBefore(Flipper, 0); ok {
+			t.Error("LastDecisionBefore(flipper, 0) found a decision before any game")
+		}
+		got, ok := store.LastDecisionBefore(Flipper, 3)
+		if !ok || got != Cheat {
+			t.Errorf("LastDecisionBefore(flipper, 3) = %v, %v; want cheat, true", got, ok)
+		}
+		if _, ok := store.LastDecisionBefore(Retaliator, 3); ok {
+			t.Error("retaliator had not played before seq 3")
+		}
+	})
+
+	t.Run("reports an unresolved earlier game", func(t *testing.T) {
+		if !store.ResolvedBefore(99) {
+			t.Error("ResolvedBefore(99) = false with nothing in flight")
+		}
+		store.ApplyEvent(6, NewGame{Id: 2, StrategyA: Flipper, StrategyB: Retaliator})
+		if store.ResolvedBefore(9) {
+			t.Error("ResolvedBefore(9) = true with game at seq 6 unresolved")
+		}
+		// A game does not block itself, or nothing could ever decide.
+		if !store.ResolvedBefore(6) {
+			t.Error("a game in flight blocked a read at its own sequence")
+		}
+	})
+}

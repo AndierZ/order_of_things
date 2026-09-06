@@ -1,0 +1,268 @@
+package session_test
+
+import (
+	"context"
+	"errors"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"order_of_things/internal/fsm"
+	"order_of_things/internal/golden"
+	"order_of_things/internal/session"
+)
+
+func status(t *testing.T, s *session.Session, component, replica string) session.ReplicaStatus {
+	t.Helper()
+	for _, st := range s.Status() {
+		if st.Component == component && st.Replica == replica {
+			return st
+		}
+	}
+	t.Fatalf("no replica %s/%s", component, replica)
+	return session.ReplicaStatus{}
+}
+
+// Availability (invariant 5) is a liveness property, verified by killing
+// something and checking the system still makes progress -- not by comparing
+// outputs. Half of every pair is removed mid-tournament and it still finishes,
+// with the same outcome a healthy run produces.
+func TestTournamentSurvivesLosingHalfOfEveryPair(t *testing.T) {
+	reference, _ := run(t, session.Config{Seed: 42, Games: 60, Replicas: 2})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	s := session.New(session.Config{Seed: 42, Games: 60, Replicas: 2})
+	s.Start(ctx)
+
+	// Wait for the tournament to be genuinely underway before pulling anything.
+	waitForGames(t, s, 5)
+	for _, component := range append([]string{"game-injector"}, strategyNames()...) {
+		if err := s.Kill(component, "r1"); err != nil {
+			t.Fatalf("killing %s/r1: %v", component, err)
+		}
+		if st := status(t, s, component, "r1"); st.Running || !st.Killed {
+			t.Errorf("%s/r1 after kill: running=%v killed=%v", component, st.Running, st.Killed)
+		}
+	}
+
+	result := s.Wait()
+	if result.Games != 60 {
+		t.Fatalf("completed %d of 60 games after losing half of every pair", result.Games)
+	}
+	if result.StateHash != reference.StateHash {
+		t.Errorf("state root %016x after failover, want %016x", result.StateHash, reference.StateHash)
+	}
+	if len(result.Quarantined) != 0 {
+		t.Errorf("killing a replica quarantined something: %v", result.Quarantined)
+	}
+}
+
+// A killed replica comes back as a fresh instance with empty state, replays the
+// log from the sequencer, and rejoins its pair. Nothing about the outcome changes.
+func TestKilledReplicaReplaysAndRejoins(t *testing.T) {
+	reference, _ := run(t, session.Config{Seed: 42, Games: 60, Replicas: 2})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	s := session.New(session.Config{Seed: 42, Games: 60, Replicas: 2})
+	s.Start(ctx)
+
+	waitForGames(t, s, 5)
+	if err := s.Kill("retaliator", "r1"); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+	waitForGames(t, s, 15)
+	if err := s.Restart("retaliator", "r1"); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	if st := status(t, s, "retaliator", "r1"); !st.Running || st.Quarantined {
+		t.Errorf("after restart: running=%v quarantined=%v", st.Running, st.Quarantined)
+	}
+
+	result := s.Wait()
+	if result.Games != 60 {
+		t.Fatalf("completed %d of 60 games", result.Games)
+	}
+	if result.StateHash != reference.StateHash {
+		t.Errorf("state root %016x after replay and rejoin, want %016x", result.StateHash, reference.StateHash)
+	}
+	if len(result.Quarantined) != 0 {
+		t.Errorf("a healthy replica was quarantined on rejoin: %v", result.Quarantined)
+	}
+}
+
+// A replica whose decisions are not a pure function of the event history
+// disagrees with its sibling, and the pair notices. Exactly one half is
+// quarantined -- and deliberately not necessarily the buggy one, because
+// divergence detection proves only that they disagreed.
+func TestImpureReplicaIsQuarantined(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	s := session.New(session.Config{
+		Seed: 42, Games: 60, Replicas: 2,
+		Bug: &session.Bug{Component: "flipper", Replica: "r1", ImpureClock: true},
+	})
+	result := s.Run(ctx)
+
+	if result.Games != 60 {
+		t.Fatalf("completed %d of 60 games; the surviving replica should carry it", result.Games)
+	}
+	if len(result.Quarantined) != 1 {
+		t.Fatalf("quarantined %v, want exactly one half of the flipper pair", result.Quarantined)
+	}
+	if got := result.Quarantined[0]; got != "flipper/r0" && got != "flipper/r1" {
+		t.Errorf("quarantined %q, want one of the flipper replicas", got)
+	}
+	// Every other pair is untouched.
+	for _, st := range s.Status() {
+		if st.Component != "flipper" && st.Quarantined {
+			t.Errorf("%s/%s was quarantined by an unrelated replica's bug", st.Component, st.Replica)
+		}
+	}
+}
+
+// A quarantined replica has refused to keep serving; it must not be allowed to
+// rejoin on request either.
+func TestQuarantinedReplicaMayNotRejoin(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	s := session.New(session.Config{
+		Seed: 42, Games: 60, Replicas: 2,
+		Bug: &session.Bug{Component: "flipper", Replica: "r1", ImpureClock: true},
+	})
+	result := s.Run(ctx)
+
+	if len(result.Quarantined) != 1 {
+		t.Fatalf("quarantined %v, want exactly one", result.Quarantined)
+	}
+	component, replica := "flipper", "r0"
+	if result.Quarantined[0] == "flipper/r1" {
+		replica = "r1"
+	}
+	err := s.Restart(component, replica)
+	if err == nil {
+		t.Fatal("a quarantined replica was allowed to rejoin")
+	}
+	if got := status(t, s, component, replica); !got.Quarantined {
+		t.Error("quarantined replica is not reported as quarantined")
+	}
+}
+
+// The tracker is a read model, not one half of an arbitrated pair, so it is not
+// a fault-injection target.
+func TestTrackerIsNotFaultInjectable(t *testing.T) {
+	s := session.New(session.Config{Seed: 42, Games: 5, Replicas: 2})
+	if err := s.Kill("game-tracker", "r0"); err == nil {
+		t.Error("killing the tracker was allowed")
+	}
+	if err := s.Kill("flipper", "nope"); err == nil {
+		t.Error("killing an unknown replica was allowed")
+	}
+}
+
+// Golden persistence closes the loop: a session in a fresh process has no live
+// sibling to check itself against, so it checks itself against the durable record
+// for its seed.
+func TestGoldenOutcomeRoundTripsAcrossStores(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "golden.json")
+
+	store, err := golden.Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	first, _ := run(t, session.Config{Seed: 42, Games: 40})
+	if err := store.Verify(first.Golden()); err != nil {
+		t.Fatalf("recording the first run: %v", err)
+	}
+
+	// A separate store, reading what the first one persisted.
+	reopened, err := golden.Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	recorded, ok := reopened.Get(42, 40)
+	if !ok {
+		t.Fatal("nothing persisted for seed 42")
+	}
+	if recorded.StateHash != first.StateHash {
+		t.Errorf("persisted state root %016x, want %016x", recorded.StateHash, first.StateHash)
+	}
+
+	// A fresh run of the same seed validates against it.
+	second, _ := run(t, session.Config{Seed: 42, Games: 40})
+	if err := reopened.Verify(second.Golden()); err != nil {
+		t.Errorf("a clean rerun failed golden verification: %v", err)
+	}
+}
+
+func TestGoldenRejectsAMismatchedOutcome(t *testing.T) {
+	store, err := golden.Open("")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	real, _ := run(t, session.Config{Seed: 42, Games: 40})
+	if err := store.Verify(real.Golden()); err != nil {
+		t.Fatalf("recording: %v", err)
+	}
+
+	tampered := real.Golden()
+	tampered.StateHash ^= 1
+
+	err = store.Verify(tampered)
+	var mismatch *golden.MismatchError
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("got %v, want a *golden.MismatchError", err)
+	}
+	if mismatch.Golden.StateHash != real.StateHash {
+		t.Errorf("mismatch reports golden %016x, want %016x", mismatch.Golden.StateHash, real.StateHash)
+	}
+}
+
+// Different seeds are different records, not a conflict.
+func TestGoldenKeysOnSeedAndGameCount(t *testing.T) {
+	store, err := golden.Open("")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	for _, cfg := range []session.Config{
+		{Seed: 42, Games: 20},
+		{Seed: 42, Games: 40},
+		{Seed: 43, Games: 20},
+	} {
+		result, _ := run(t, cfg)
+		if err := store.Verify(result.Golden()); err != nil {
+			t.Errorf("seed %d over %d games: %v", cfg.Seed, cfg.Games, err)
+		}
+	}
+	if _, ok := store.Get(42, 20); !ok {
+		t.Error("seed 42 over 20 games was not recorded")
+	}
+	if _, ok := store.Get(42, 99); ok {
+		t.Error("an unrecorded game count returned a record")
+	}
+}
+
+func waitForGames(t *testing.T, s *session.Session, n int) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if s.Tracker().Snapshot().Completed >= n {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("tournament did not reach %d games", n)
+}
+
+func strategyNames() []string {
+	names := make([]string, 0, len(fsm.AllStrategies))
+	for _, s := range fsm.AllStrategies {
+		names = append(names, string(s))
+	}
+	return names
+}

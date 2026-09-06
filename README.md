@@ -116,41 +116,72 @@ side-effecting code twice and reconcile the results. It is trivial here precisel
 the race can simply be allowed. The sequencer admits the first response and drops
 the second as a duplicate, and it never has to ask which was better.
 
-## Two defects, two mechanisms
+## Defects, and the mechanisms that catch them
 
-They are caught by different machinery, which is why both exist:
+Three defects can be injected, and they are caught by different machinery, which
+is why more than one mechanism exists:
 
 | defect | what it corrupts | caught by |
 |---|---|---|
-| `WrongDecision` | the **decision** function | rehearsal, every time — this is what the UI injects |
-| `ImpureClock` | the decision function, *intermittently* | rehearsal, usually — see below |
+| `WrongDecision` | the **decision** function, always | rehearsal, every time — this is what the UI injects |
 | `CorruptPayoff` | the **transition** function | the canonical state-root chain |
+| `ImpureClock` | the decision function, *intermittently* | rehearsal, usually — and see below |
 
-The first is invisible to the chain — a replica deciding badly still computes
-state correctly. The second is invisible to the pair — a sibling running the same
-defect agrees with it, which is the known limit of active-active. Only a
-reference computed before either replica ran can say which one is wrong.
-
-`ImpureClock` is kept because reading the wall clock is the canonical violation
-of invariant 3, but it makes a bad demonstration and the reason is worth knowing.
-Rehearsal asks a player for all of its decisions inside a loop lasting
-microseconds. On a machine whose clock granularity is coarser than that loop,
-every call reads the same instant, the whole rehearsal comes out honest, and the
-replica is let through — only to diverge later, live, where decisions are a
-second apart. **An intermittent fault will pass a finite examination**, and no
-amount of checking changes that; rehearsal runs three passes rather than one for
-this reason, which improves the odds and settles nothing. The defect the UI
-injects is deterministically wrong instead, so it is refused every time on every
-machine.
+A bad decision is invisible to the chain: a replica deciding wrongly still
+computes its state perfectly. A bad transition is invisible to the pair: a
+sibling running the same defect agrees with it, which is the known limit of
+active-active. Only a reference computed before either replica ran can say which
+one is wrong.
 
 Quarantine refuses a divergent *instance*, not the name forever: redeploy the
 replica clean and it is let back in, having earned it by replaying correctly.
 
-Both are injectable from the UI, and both name the actually-defective replica,
-because on the replay path a replica is compared against recorded history it
-cannot influence. On the *live* path that is not true: two replicas race, the
-loser is quarantined, and it may well be the healthy half. Divergence detection
-proves they disagreed — never which was right.
+All three name the actually-defective replica, because on the replay path a
+replica is compared against recorded history it cannot influence. On the *live*
+path that is not true: two replicas race, the loser is quarantined, and it may
+well be the healthy half. Divergence detection proves they disagreed — never
+which was right.
+
+### Why the injected defect is not the interesting one
+
+`ImpureClock` — reading `time.Now()` inside a decision — was the obvious choice.
+It is *the* canonical violation of invariant 3, and it is what the UI injected,
+until it produced a bug report worth the whole detour.
+
+The symptom: click the bug button a few times and eventually the replica comes
+back **running** instead of refused, and moments later its perfectly healthy
+partner is quarantined instead. Reproducible in about four clicks on a remote
+server. Not reproducible at all on the development machine — 200 attempts, 200
+refusals.
+
+Rehearsal asks a player for every decision it makes across the canonical
+tournament. Flipper makes twelve. A clock-dependent defect flips a coin per
+decision, so it should survive all twelve by chance 0.5¹² ≈ **0.024%** of the
+time. Four clicks implies something nearer **25%**, a thousand times higher — and
+that is only possible if the twelve flips are not independent. They are not.
+Rehearsal asks all twelve inside a loop lasting *microseconds*, so wherever the
+clock's granularity is coarser than that loop, every call reads the same instant
+and the twelve coins collapse into **one**. It comes out honest half the time.
+Four clicks then reproduce it with 94% probability, which is what was observed.
+Once through, it goes live — where decisions are a second apart, the coin really
+does flip, it wins a race, and its wrong answer enters the log.
+
+The lesson is not that the check is weak. The check is as strong as a check can
+be, and the arithmetic above is the proof:
+
+> **An intermittent fault will pass a finite examination.** You cannot verify your
+> way out of it, and no amount of repetition closes the gap — it only moves the
+> decimal point.
+
+Rehearsal makes three passes rather than one for exactly this reason: a pure
+function gives the same answer every time it is asked, and asking repeatedly is
+the most any finite check can do. It improves the odds and settles nothing.
+
+So the defect the UI injects is deterministically wrong instead, and is refused
+every time on every machine. `ImpureClock` stays, reachable from the API and the
+CLI, because it is the honest illustration of the limit — and because a defect
+that is invisible on the developer's laptop and reliable in production is not a
+contrived example. It is the normal shape of the worst bugs there are.
 
 ## The coordination table
 

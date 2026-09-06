@@ -28,6 +28,43 @@ here is a constant and is not offered as a control. The claim is about what
 survives the shocks *you* introduce, with no coordination between components
 beyond the order of the log.
 
+## The races are still there
+
+It would be easy to read the above as "this system is deterministic, therefore
+nothing races." It is the opposite. **Two runs of this tournament do not produce
+the same log, and never will.**
+
+Every player is two replicas computing the same answer and racing to the
+sequencer. Whichever arrives first is admitted; the other is dropped as a
+duplicate. Which one wins is a real-time outcome, and it differs every run — open
+the event log and you will see `flip/r0` on a position where the last run had
+`flip/r1`. Nine goroutines, contending for one gate, all the way down.
+
+What is identical is the *logical* outcome: the same games, the same decisions,
+the same scores, the same final state. So the tests compare the log with the
+winning replica's identity deliberately excluded — that field is nondeterministic
+on purpose, and asserting on it would be asserting on the wrong thing:
+
+```go
+// SenderId is excluded on purpose: which replica of a component won the race to
+// the sequencer is a real-time outcome and is legitimately nondeterministic.
+// Everything else -- the order, the emitting component, the payload -- is not.
+```
+
+This is the whole philosophy, and it is the opposite of the usual instinct. The
+goal is not to remove nondeterminism — you cannot, and a system that tried would
+be slower and no more correct. The goal is to **confine** it: let the races happen
+wherever they cannot change the answer, and make every interleaving converge on
+the same logical outcome. Determinism is not a property you switch on globally.
+It is something you scope, and the skill is scoping it no tighter than it needs to
+be.
+
+Everything else here follows from that. Active-active is safe because it does not
+matter which replica wins. Pacing is safe because it changes when events are
+admitted, not which. And v2 — dependency-aware concurrency, out of scope for this
+build — is the same idea taken further: let genuinely disjoint games run at once,
+because their interleaving cannot change the result either.
+
 ## What replay buys you
 
 **Recovery.** A replica that dies rebuilds its entire state by replaying the log.
@@ -75,9 +112,9 @@ them generalise to a running system:
 
 **Cheap redundancy.** Active-active is normally hard: you cannot re-run
 side-effecting code twice and reconcile the results. It is trivial here precisely
-*because* the components are deterministic — there is nothing to reconcile. Two
-replicas of a player race for every decision; the sequencer admits the first and
-drops the second as a duplicate.
+*because* the components are deterministic — there is nothing to reconcile, so
+the race can simply be allowed. The sequencer admits the first response and drops
+the second as a duplicate, and it never has to ask which was better.
 
 ## Two defects, two mechanisms
 
@@ -146,11 +183,13 @@ internal/web        HTTP, SSE, and the page
 
 ## Deliberate non-goals
 
-Single process with goroutines rather than services across hosts; the sequencer
-is not itself made highly available (a real one would be Raft-backed); faults are
-simulated by stopping a loop rather than by signalling a process; only divergence
-is detected, not correctness. Each is a scoping decision, argued in
-`deterministic-tournament-design-doc.md`.
+* Single process with goroutines rather than services across hosts
+* Head-of-line blocking in state transition for visualization in the UI and simplicity
+* The sequencer is not itself made highly available (a real one would be Raft-backed)
+* Faults are simulated by stopping a loop rather than by signalling a process
+* Only divergence is detected, not correctness
+
+Each is a scoping decision, argued in `deterministic-tournament-design-doc.md`.
 
 ---
 

@@ -11,7 +11,8 @@ import (
 // It must be a pure function of the events it has been given: no time.Now, no
 // ungoverned randomness, no map-iteration-order dependence. Both replicas of a
 // component run this same function over the same event history and are expected
-// to produce byte-identical output.
+// to compute the same answer -- which is what makes it safe for whichever of them
+// reaches the sequencer first to be the one that counts.
 //
 // The handler is also invoked once with a ReplayComplete event, after the log has
 // been replayed and before any live event. Components that need to bootstrap the

@@ -13,7 +13,9 @@ import (
 // is admitted, never which event or in what order. That is safe here because v1
 // is strictly turn-taking -- at any moment exactly one component has something to
 // send -- so arrival order at the sequencer is forced by the shape of the
-// tournament rather than by timing, and the log is byte-identical at any speed.
+// tournament rather than by timing, and the log carries the same events in the
+// same order at any speed. Which replica of a component won each position still
+// varies, as it always does -- that race is not affected by pacing either.
 // It would stop being safe the moment two unrelated components could be waiting
 // to send at once, which is exactly what v2 introduces; the v2 injector has to
 // fix the logical order at admission for that reason anyway.

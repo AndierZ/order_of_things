@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -231,4 +232,46 @@ func TestConcurrentSessionsAreIndependent(t *testing.T) {
 			t.Errorf("concurrent session on seed 7 diverged: hash %x, want %x", got.StateHash, reference.StateHash)
 		}
 	}
+}
+
+// The philosophy, pinned. Two runs of the same tournament do not produce the same
+// log and never will: both replicas of a player race for every position and which
+// one wins is a real-time outcome. What is identical is the logical outcome.
+//
+// The goal was never to remove the nondeterminism -- it is to confine it to the
+// place where it cannot change the answer. This test asserts both halves of that
+// at once: the logical signature is invariant, and the identity of the winners
+// underneath it is not.
+func TestTheRacesVaryWhileTheOutcomeDoesNot(t *testing.T) {
+	const runs = 6
+
+	signatures := make(map[string]bool)
+	winners := make(map[string]bool)
+	outcomes := make(map[uint64]bool)
+
+	for i := 0; i < runs; i++ {
+		result, log := run(t, session.Config{Seed: 42, Games: 25, Replicas: 2})
+		signatures[strings.Join(logSignature(log), "|")] = true
+		outcomes[result.StateHash] = true
+
+		ids := make([]string, 0, len(log))
+		for _, e := range log {
+			ids = append(ids, e.Header.SenderComponent+"/"+e.Header.SenderId)
+		}
+		winners[strings.Join(ids, ",")] = true
+	}
+
+	if len(signatures) != 1 {
+		t.Errorf("%d runs produced %d different logical logs, want 1", runs, len(signatures))
+	}
+	if len(outcomes) != 1 {
+		t.Errorf("%d runs produced %d different outcomes, want 1", runs, len(outcomes))
+	}
+	// If this ever fails, the pair has stopped racing -- one replica is winning
+	// everything and the other is a hot standby, which is not active-active.
+	if len(winners) < 2 {
+		t.Errorf("%d runs produced the same winners every time; the replicas are not racing", runs)
+	}
+	t.Logf("%d runs: %d logical log(s), %d outcome(s), %d distinct winner sequences",
+		runs, len(signatures), len(outcomes), len(winners))
 }

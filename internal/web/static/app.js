@@ -103,7 +103,7 @@ theme.addEventListener("error", () => {
 
 function paintMute() {
   const button = $("mute");
-  button.textContent = theme.muted ? "Sound off" : "Sound on";
+  button.textContent = theme.muted ? "Sound Off" : "Sound On";
   button.setAttribute("aria-pressed", String(theme.muted));
   button.title = theme.muted ? "Unmute the music" : "Mute the music";
 }

@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -45,9 +46,12 @@ type Registry struct {
 	// now is injectable so tests do not depend on the clock.
 	now func() time.Time
 
-	mu       sync.Mutex
-	sessions map[string]*entry
-	nextId   int
+	mu sync.Mutex
+	// canonical caches the reference per (seed, games) so it is computed once per
+	// process rather than once per session.
+	canonical map[string]*golden.Validator
+	sessions  map[string]*entry
+	nextId    int
 }
 
 type entry struct {
@@ -64,11 +68,12 @@ type entry struct {
 // in-memory store.
 func NewRegistry(store *golden.Store) *Registry {
 	return &Registry{
-		golden:   store,
-		games:    DefaultGames,
-		interval: DefaultInterval,
-		now:      time.Now,
-		sessions: make(map[string]*entry),
+		golden:    store,
+		games:     DefaultGames,
+		interval:  DefaultInterval,
+		now:       time.Now,
+		canonical: make(map[string]*golden.Validator),
+		sessions:  make(map[string]*entry),
 	}
 }
 
@@ -164,25 +169,51 @@ func (r *Registry) Create(ctx context.Context, seed int64) (*Handle, error) {
 	return &Handle{Id: id, Seed: seed, Games: games, Session: live}, nil
 }
 
-// reference returns the canonical chain for a seed, generating it if this is the
-// first time the seed has been seen.
+// reference returns the canonical chain for a seed, generating it from the code
+// rather than reading it from disk.
+//
+// The stored record is a check, never a source of truth. Regenerating costs a
+// few milliseconds; trusting a file instead means a reference left over from an
+// older build is silently authoritative, and healthy replicas get refused for
+// disagreeing with something that is itself wrong. So the file is compared
+// against and reported on, and what the runtime actually validates against is
+// what this build just computed.
 func (r *Registry) reference(ctx context.Context, seed int64, games int) (*golden.Validator, error) {
-	if validator := r.golden.Validator(seed, games); validator != nil {
-		return validator, nil
+	key := fmt.Sprintf("%d:%d", seed, games)
+
+	r.mu.Lock()
+	cached := r.canonical[key]
+	r.mu.Unlock()
+	if cached != nil {
+		return cached, nil
 	}
 
-	// Unpaced, single instance, no defects, and explicitly no validator -- there
-	// is nothing to validate against yet, and this run is what defines it, log
-	// and all.
 	result := New(Config{Seed: seed, Games: games, Replicas: 1}).Run(ctx)
 	if result.Games != games {
 		return nil, fmt.Errorf("session: reference run for seed %d reached only %d of %d games",
 			seed, result.Games, games)
 	}
-	if err := r.golden.Record(result.Golden()); err != nil {
-		return nil, err
+	fresh := result.Golden()
+
+	switch recorded, ok := r.golden.Get(seed, games); {
+	case !ok:
+		if err := r.golden.Record(fresh); err != nil {
+			return nil, err
+		}
+	case recorded.StateHash != fresh.StateHash:
+		// The recorded tournament and this build disagree. That is a real finding
+		// -- the rules changed -- and it wants regenerating deliberately, so it is
+		// reported rather than quietly overwritten.
+		log.Printf("golden: this build does not reproduce the recorded tournament for seed %d: "+
+			"state root %016x, recorded %016x. The recorded one is stale; regenerate it with "+
+			"`go test ./internal/session -run Golden -update`.", seed, fresh.StateHash, recorded.StateHash)
 	}
-	return r.golden.Validator(seed, games), nil
+
+	validator := golden.NewValidator(fresh)
+	r.mu.Lock()
+	r.canonical[key] = validator
+	r.mu.Unlock()
+	return validator, nil
 }
 
 // Get returns a live session by id, marking it as recently used.

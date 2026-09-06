@@ -206,6 +206,37 @@ go run ./cmd/tournament    # headless, verifies against the golden record
 go test -race ./...
 ```
 
+### The committed tournament
+
+`testdata/golden.json` holds the canonical tournament — its full event log, the
+state root after every event, and the final standings. It is checked in, and it is
+a **regression fixture, not a cache**. Change a payoff, a strategy, the pairing
+draw or the hashing scheme and this fails:
+
+```
+this build produces a different tournament than the committed one:
+  state root b6321599e4be266b, committed 1b034db9c4c9e1ca
+  leaderboard [{copy-leader 28} {flipper 24} …], committed [{copy-leader 26} …]
+```
+
+If that was intended, regenerate it deliberately and read the diff before
+committing:
+
+```
+go test ./internal/session -run Golden -update
+```
+
+A change there you did not intend is the system telling you it stopped being the
+same system, which for a project whose entire claim is reproducibility is the one
+thing worth failing a build over.
+
+Nothing at runtime reads that file as truth. The server regenerates the canonical
+tournament from the code at startup — it costs a few milliseconds — validates
+replicas against what it just computed, and only *compares* the committed record,
+reporting a mismatch rather than believing it. That distinction matters: a
+reference left over from an older build, trusted, would refuse perfectly healthy
+replicas for disagreeing with something that was itself wrong.
+
 The page is driven entirely by folding an ordered feed of events. Nothing is
 polled, nothing is recomputed from a rendered view: a game row appears because a
 `new-game` event arrived, a decision fills in because a `decision` event arrived,

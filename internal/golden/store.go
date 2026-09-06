@@ -111,6 +111,13 @@ type Validator struct {
 	outcome Outcome
 }
 
+// NewValidator builds a checker straight from an outcome, without going through
+// the store. The runtime uses this: it regenerates the canonical tournament and
+// validates against what it just computed, never against a file.
+func NewValidator(outcome Outcome) *Validator {
+	return &Validator{outcome: outcome}
+}
+
 // Log is the canonical tournament, for a replica to rehearse against.
 func (v *Validator) Log() []Event {
 	if v == nil {

@@ -42,6 +42,44 @@ func (g *Game) Involves(s Strategy) bool {
 	return g.StrategyA == s || g.StrategyB == s
 }
 
+// NextToMove returns the participant whose decision is expected next, or "" if
+// the game is already resolved. Decisions are taken in order -- A, then B -- so
+// there is always exactly one strategy the game is waiting on.
+func (g *Game) NextToMove() Strategy {
+	if g == nil {
+		return ""
+	}
+	if g.DecisionA == nil {
+		return g.StrategyA
+	}
+	if g.DecisionB == nil {
+		return g.StrategyB
+	}
+	return ""
+}
+
+// Clone returns a deep copy.
+//
+// Completed games are never touched again, so they can be shared freely. A game
+// still in flight is not: its decisions are filled in as they arrive. Anything
+// published outside the owning goroutine has to be a copy, or a reader holding
+// what it thinks is an immutable snapshot will watch it change.
+func (g *Game) Clone() *Game {
+	if g == nil {
+		return nil
+	}
+	clone := *g
+	if g.DecisionA != nil {
+		decision := *g.DecisionA
+		clone.DecisionA = &decision
+	}
+	if g.DecisionB != nil {
+		decision := *g.DecisionB
+		clone.DecisionB = &decision
+	}
+	return &clone
+}
+
 // GameStore is the replicated state machine every component runs. It is fed the
 // same globally ordered event stream, so every component -- and every replica of
 // every component -- holds an identical copy. All transitions here must be pure.
@@ -52,9 +90,43 @@ type GameStore struct {
 	nextGameId     int64
 	appliedSeq     int64
 	stateHash      uint64
+	bug            *Bug
+}
+
+// Bug corrupts a store's transition function on purpose, so the state-root chain
+// has something real to catch.
+//
+// This is a different class of defect from a strategy that decides badly. A bad
+// decision shows up as an emission that disagrees with the log; a bad transition
+// leaves the replica's emissions looking perfectly reasonable while its idea of
+// the world quietly rots. Only a reference computed independently of this replica
+// can tell the difference.
+type Bug struct {
+	// CorruptPayoff makes the store award the wrong score, from the given game
+	// onward. Emissions are unaffected until some later decision happens to
+	// depend on the scores, which may be never.
+	CorruptPayoff bool
+	// FromGame delays the corruption, so a replica can replay correctly for a
+	// while and then diverge at a visible point rather than at event zero.
+	FromGame int64
 }
 
 func NewGameStore() *GameStore {
+	return newStore(nil)
+}
+
+// NewGameStoreWithBug builds a deliberately defective store.
+func NewGameStoreWithBug(bug Bug) *GameStore {
+	return newStore(&bug)
+}
+
+func newStore(bug *Bug) *GameStore {
+	store := newEmptyStore()
+	store.bug = bug
+	return store
+}
+
+func newEmptyStore() *GameStore {
 	return &GameStore{
 		currentGame:    nil,
 		leaderboard:    make(map[Strategy]int),
@@ -99,6 +171,7 @@ func (g *GameStore) ApplyEvent(seq int64, payload any) *Game {
 			completed := g.currentGame
 			g.currentGame = nil
 			calculatePayoff(completed)
+			g.corrupt(completed)
 			g.leaderboard[completed.StrategyA] += completed.PayoffA
 			g.leaderboard[completed.StrategyB] += completed.PayoffB
 			g.completedGames = append(g.completedGames, completed)
@@ -106,6 +179,14 @@ func (g *GameStore) ApplyEvent(seq int64, payload any) *Game {
 		}
 	}
 	return nil
+}
+
+// corrupt applies the injected transition bug, if any.
+func (g *GameStore) corrupt(game *Game) {
+	if g.bug == nil || !g.bug.CorruptPayoff || game.Id < g.bug.FromGame {
+		return
+	}
+	game.PayoffA++
 }
 
 func calculatePayoff(game *Game) {

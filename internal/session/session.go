@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"order_of_things/internal/fsm"
 	"order_of_things/internal/golden"
@@ -13,21 +14,46 @@ import (
 	"order_of_things/internal/tracker"
 )
 
-// Bug names a determinism defect to inject into a single replica, so the
-// divergence and quarantine path can be exercised on demand rather than existing
-// only as an untested code path.
-type Bug struct {
-	// Component and Replica select which instance to corrupt. Only ever one:
-	// a pair where both replicas share a bug agrees with itself, which is the
-	// limitation of active-active the design names explicitly.
-	Component string
-	Replica   string
-	// ImpureClock makes the replica's decision depend on the wall clock. Diverges
-	// immediately, including in v1.
+// Defect is a determinism bug to inject into a single replica, so the divergence
+// and quarantine paths can be exercised on demand rather than existing only as
+// untested code.
+//
+// The two live defects are caught by different mechanisms, which is the reason
+// both mechanisms exist:
+//
+//	ImpureClock    wrong decisions, right state -> caught by comparing this
+//	               replica's emissions against what the log recorded. Proves the
+//	               pair disagreed; cannot say which half was right.
+//	CorruptPayoff  right decisions, wrong state -> invisible to the pair, since a
+//	               sibling with the same defect would agree. Caught by the
+//	               canonical state-root chain, which does say which is wrong,
+//	               because the reference was computed before either replica ran.
+type Defect struct {
+	// ImpureClock makes the replica's decision depend on the wall clock.
 	ImpureClock bool
+	// CorruptPayoff makes the replica mis-apply scores while still deciding
+	// plausibly.
+	CorruptPayoff bool
+	// CorruptFromGame delays CorruptPayoff, so a restarting replica replays
+	// correctly for a while and then diverges at a visible point.
+	CorruptFromGame int64
 	// SkipWatermark makes CopyLeader read the newest scores rather than the ones
 	// scoped to its own game. Dormant in v1; breaks invariant 1 in v2.
 	SkipWatermark bool
+}
+
+// Any reports whether the defect asks for anything at all.
+func (d Defect) Any() bool {
+	return d.ImpureClock || d.CorruptPayoff || d.SkipWatermark
+}
+
+// Bug places a Defect on one specific replica at session construction. Only ever
+// one: a pair where both replicas share a bug agrees with itself, which is the
+// limitation of active-active the design names explicitly.
+type Bug struct {
+	Component string
+	Replica   string
+	Defect
 }
 
 // Config describes one tournament.
@@ -39,8 +65,15 @@ type Config struct {
 	// Replicas is how many instances of every component to run. 1 is a
 	// single-instance system; 2 is the active-active pair the design calls for.
 	Replicas int
-	// Bug optionally corrupts one replica.
+	// Bug optionally corrupts one replica from the start.
 	Bug *Bug
+	// Interval paces admission, one event per interval. Zero runs flat out,
+	// which is what headless reference runs and tests want.
+	Interval time.Duration
+	// Reference is the canonical state-root chain every replica is checked
+	// against as it applies events. Nil disables the check, which is what the
+	// run that generates the reference has to do.
+	Reference *golden.Validator
 }
 
 func (c Config) withDefaults() Config {
@@ -66,7 +99,10 @@ type component interface {
 type slot struct {
 	component string
 	id        string
-	build     func() component
+	build     func(Defect) component
+	// defect is what this slot was last built with, so a restart without an
+	// explicit defect comes back clean rather than inheriting one.
+	defect Defect
 	// The tracker is a single long-lived read model rather than one half of an
 	// arbitrated pair, so it is supervised but not fault-injectable.
 	restartable bool
@@ -96,20 +132,33 @@ type Session struct {
 	sequencer *platform.Sequencer
 	tracker   *tracker.Tracker
 
+	pacer         *platform.Pacer
+	chain         []uint64
 	mu            sync.Mutex
 	slots         []*slot
 	ctx           context.Context
 	cancel        context.CancelFunc
 	sequencerDone chan struct{}
 	started       bool
+
+	// Wait is one-shot but callable from anywhere: the registry waits on every
+	// session it owns, and whoever holds a handle will naturally wait too. Running
+	// the teardown twice would drain the same channels twice and block forever, so
+	// it happens once and every caller gets the same Result.
+	waitOnce sync.Once
+	result   Result
 }
 
 func New(cfg Config) *Session {
 	cfg = cfg.withDefaults()
 	sequencer := platform.NewSequencer()
+	pacer := platform.NewPacer(cfg.Interval)
+	sequencer.SetPacer(pacer)
+
 	s := &Session{
 		cfg:       cfg,
 		sequencer: sequencer,
+		pacer:     pacer,
 		tracker:   tracker.New("r0", cfg.Games, sequencer),
 	}
 
@@ -117,31 +166,43 @@ func New(cfg Config) *Session {
 	s.slots = append(s.slots, &slot{
 		component: tracker.Component,
 		id:        "r0",
-		build:     func() component { return s.tracker },
+		build:     func(Defect) component { return s.tracker },
 	})
+
+	var validator platform.StateValidator
+	if cfg.Reference != nil {
+		validator = cfg.Reference
+	}
 
 	for r := 0; r < cfg.Replicas; r++ {
 		id := fmt.Sprintf("r%d", r)
-		s.add(injector.Component, id, func() component {
-			return injector.NewGameInjector(id, cfg.Seed, cfg.Games, sequencer)
+		s.add(injector.Component, id, func(Defect) component {
+			return injector.NewGameInjector(id, cfg.Seed, cfg.Games, sequencer, validator)
 		})
 		for _, name := range fsm.AllStrategies {
-			playerCfg := strategy.Config{}
-			if bug := cfg.Bug; bug != nil && bug.Component == string(name) && bug.Replica == id {
-				playerCfg = strategy.Config{
-					SkipWatermark: bug.SkipWatermark,
-					ImpureClock:   bug.ImpureClock,
-				}
-			}
-			s.add(string(name), id, func() component {
-				return strategy.New(name, id, sequencer, playerCfg)
+			s.add(string(name), id, func(defect Defect) component {
+				return strategy.New(name, id, sequencer, strategy.Config{
+					SkipWatermark:   defect.SkipWatermark,
+					ImpureClock:     defect.ImpureClock,
+					CorruptPayoff:   defect.CorruptPayoff,
+					CorruptFromGame: defect.CorruptFromGame,
+					Validator:       validator,
+				})
 			})
+		}
+	}
+
+	if bug := cfg.Bug; bug != nil {
+		for _, sl := range s.slots {
+			if sl.component == bug.Component && sl.id == bug.Replica {
+				sl.defect = bug.Defect
+			}
 		}
 	}
 	return s
 }
 
-func (s *Session) add(component, id string, build func() component) {
+func (s *Session) add(component, id string, build func(Defect) component) {
 	s.slots = append(s.slots, &slot{
 		component: component, id: id, build: build, restartable: true,
 	})
@@ -162,6 +223,7 @@ type Result struct {
 	Leaderboard []fsm.LeaderboardEntry
 	StateHash   uint64
 	LogLength   int
+	Chain       []uint64
 	Quarantined []string
 }
 
@@ -172,6 +234,7 @@ func (r Result) Golden() golden.Outcome {
 		Games:       r.Games,
 		StateHash:   r.StateHash,
 		Leaderboard: r.Leaderboard,
+		Chain:       r.Chain,
 	}
 }
 
@@ -200,18 +263,24 @@ func (s *Session) Start(ctx context.Context) {
 func (s *Session) startLocked(sl *slot) {
 	ctx, cancel := context.WithCancel(s.ctx)
 	done := make(chan error, 1)
-	instance := sl.build()
+	instance := sl.build(sl.defect)
 
 	sl.cancel, sl.done, sl.running, sl.killed = cancel, done, true, false
 	go func() { done <- instance.Run(ctx) }()
 }
 
 // Wait blocks until the tournament reaches its target or ctx is cancelled, then
-// stops everything and reports the outcome.
+// stops everything and reports the outcome. Safe to call more than once, and from
+// more than one goroutine; every caller gets the same Result.
 func (s *Session) Wait() Result {
 	if !s.started {
 		panic("session: Wait called before Start")
 	}
+	s.waitOnce.Do(func() { s.result = s.shutdown() })
+	return s.result
+}
+
+func (s *Session) shutdown() Result {
 	select {
 	case <-s.tracker.Done():
 	case <-s.ctx.Done():
@@ -238,6 +307,16 @@ func (s *Session) Wait() Result {
 	s.mu.Unlock()
 	<-s.sequencerDone
 
+	// Rebuild the state-root chain from the log. Doing it here rather than
+	// having the tracker accumulate it keeps the chain a property of the log,
+	// which is what a replaying replica is actually checked against.
+	replay := fsm.NewGameStore()
+	s.chain = make([]uint64, 0, len(s.sequencer.EventLog()))
+	for _, e := range s.sequencer.EventLog() {
+		replay.ApplyEvent(e.Header.Seq, e.Payload)
+		s.chain = append(s.chain, replay.StateHash())
+	}
+
 	store := s.tracker.GameStore()
 	return Result{
 		Seed:        s.cfg.Seed,
@@ -245,6 +324,7 @@ func (s *Session) Wait() Result {
 		Leaderboard: store.Leaderboard(),
 		StateHash:   store.StateHash(),
 		LogLength:   len(s.sequencer.EventLog()),
+		Chain:       s.chain,
 		Quarantined: quarantined,
 	}
 }
@@ -282,9 +362,19 @@ func (s *Session) Kill(component, id string) error {
 
 // Restart brings a killed replica back as a fresh instance with empty state. It
 // subscribes, replays the log from the sequencer, and rejoins its pair -- unless
-// its replay disagrees with what the log records, in which case it quarantines
-// itself before it can affect anything.
+// its replay disagrees with what the log records or with the canonical chain, in
+// which case it quarantines itself before it can affect anything.
 func (s *Session) Restart(component, id string) error {
+	return s.restart(component, id, Defect{})
+}
+
+// RestartWithBug brings a killed replica back defective. Both defects are caught
+// during replay, by different mechanisms, and neither replica rejoins.
+func (s *Session) RestartWithBug(component, id string, defect Defect) error {
+	return s.restart(component, id, defect)
+}
+
+func (s *Session) restart(component, id string, defect Defect) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -301,24 +391,55 @@ func (s *Session) Restart(component, id string) error {
 	if sl.quarantined {
 		return fmt.Errorf("session: %s is quarantined and may not rejoin", sl)
 	}
+	sl.defect = defect
 	s.startLocked(sl)
 	return nil
 }
 
-// ReplicaStatus reports what the supervisor knows about one replica.
+// Pause holds event admission. Everything stays where it is; nothing is lost.
+func (s *Session) Pause() { s.pacer.Pause() }
+
+// Resume releases event admission.
+func (s *Session) Resume() { s.pacer.Resume() }
+
+// Step admits exactly one event and leaves the session paused.
+func (s *Session) Step() { s.pacer.Step() }
+
+// SetInterval changes the time between admissions, taking effect immediately.
+func (s *Session) SetInterval(interval time.Duration) { s.pacer.SetInterval(interval) }
+
+// Pacing reports whether events are being admitted, and how fast.
+func (s *Session) Pacing() (running bool, interval time.Duration) { return s.pacer.State() }
+
+// Seed is the session's seed, which is all that is needed to reproduce it.
+func (s *Session) Seed() int64 { return s.cfg.Seed }
+
+// Games is the number of games this session will play.
+func (s *Session) Games() int { return s.cfg.Games }
+
+// ReplicaStatus reports what the supervisor knows about one replica. The UI
+// draws one character per replica, so this is the per-character state.
 type ReplicaStatus struct {
 	Component   string
 	Replica     string
 	Running     bool
 	Killed      bool
 	Quarantined bool
+	Defect      Defect
+	// Wins is how many events this replica won the race to admit. A replica that
+	// never wins is a hot standby, not half of an active-active pair.
+	Wins int
 }
+
+// Live reports whether this replica is able to serve.
+func (r ReplicaStatus) Live() bool { return r.Running && !r.Quarantined }
 
 // Status lists every supervised replica. Safe from any goroutine.
 func (s *Session) Status() []ReplicaStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	wins := s.tracker.Snapshot().Wins
 	statuses := make([]ReplicaStatus, 0, len(s.slots))
 	for _, sl := range s.slots {
 		statuses = append(statuses, ReplicaStatus{
@@ -327,9 +448,50 @@ func (s *Session) Status() []ReplicaStatus {
 			Running:     sl.running,
 			Killed:      sl.killed,
 			Quarantined: sl.quarantined,
+			Defect:      sl.defect,
+			Wins:        wins[sl.component+"/"+sl.id],
 		})
 	}
 	return statuses
+}
+
+// Stalled reports whether the tournament cannot make progress because a strategy
+// in the current game has no live replica, and names the strategy if so.
+//
+// It is derived, not timed: the supervisor knows which replicas are live and the
+// tracker knows who is playing, so no clock is involved. Killing both halves of a
+// pair is allowed precisely so this can happen -- it is the most direct
+// demonstration of why there are two of everything, and restarting either half
+// clears it.
+//
+// The condition is eventual, not instantaneous. It is read from the tracker's
+// published snapshot, and a replica killed with an emission already in flight
+// leaves a couple of events still to settle. Expect a brief window after a kill
+// where this reports a stall that then resolves itself; it is a signal for the
+// viewer, not a lock.
+func (s *Session) Stalled() (bool, string) {
+	// Only the strategy actually due to move can block the game. Its opponent
+	// being dead does not stall anything yet: the game still has this move left
+	// in it, and will not be waiting on the dead half until its turn comes round.
+	next := s.tracker.Snapshot().CurrentGame.NextToMove()
+	if next == "" {
+		return false, ""
+	}
+	if s.componentIsLive(string(next)) {
+		return false, ""
+	}
+	return true, string(next)
+}
+
+func (s *Session) componentIsLive(component string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, sl := range s.slots {
+		if sl.component == component && sl.running && !sl.quarantined {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Session) findLocked(component, id string) (*slot, error) {

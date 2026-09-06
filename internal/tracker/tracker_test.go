@@ -8,12 +8,26 @@ import (
 )
 
 func sequenced(seq int64, payload any) *platform.Event {
-	return &platform.Event{Header: platform.Header{Seq: seq}, Payload: payload}
+	return &platform.Event{
+		Header:  platform.Header{Seq: seq, SenderComponent: "test", SenderId: "r0"},
+		Payload: payload,
+	}
 }
 
 func newTracker(target int) *Tracker {
-	t := &Tracker{gameStore: fsm.NewGameStore(), target: target, done: make(chan struct{})}
-	t.snapshot.Store(&Snapshot{Seq: -1, Leaderboard: []fsm.LeaderboardEntry{}})
+	t := &Tracker{
+		gameStore: fsm.NewGameStore(),
+		events:    make([]LoggedEvent, 0, eventFeed),
+		wins:      make(map[string]int),
+		target:    target,
+		done:      make(chan struct{}),
+	}
+	t.snapshot.Store(&Snapshot{
+		Seq:         -1,
+		Leaderboard: []fsm.LeaderboardEntry{},
+		Events:      []LoggedEvent{},
+		Wins:        map[string]int{},
+	})
 	return t
 }
 
@@ -115,4 +129,105 @@ func TestDoneFiresOnceAtTheTarget(t *testing.T) {
 
 	// Games beyond the target must not close it a second time.
 	playGame(tr, seq, fsm.Flipper, fsm.Retaliator, fsm.Cheat, fsm.Cheat)
+}
+
+// The event feed is what the UI draws the machine from, and Replica is the only
+// field in a snapshot that is not a logical fact -- it is which half of the pair
+// won the race, and the only place active-active is visible.
+func TestEventFeedRecordsWhoWonEachPosition(t *testing.T) {
+	tr := newTracker(0)
+	tr.HandleEvent(&platform.Event{
+		Header:  platform.Header{Seq: 0, SenderComponent: "game-injector", SenderId: "r1"},
+		Payload: fsm.NewGame{Id: 0, StrategyA: fsm.Flipper, StrategyB: fsm.Cooperator},
+	})
+	tr.HandleEvent(&platform.Event{
+		Header:  platform.Header{Seq: 1, SenderComponent: "flipper", SenderId: "r0"},
+		Payload: fsm.GameDecision{Strategy: fsm.Flipper, Decision: fsm.Cheat},
+	})
+
+	events := tr.Snapshot().Events
+	if len(events) != 2 {
+		t.Fatalf("feed has %d events, want 2", len(events))
+	}
+	if events[0].Component != "game-injector" || events[0].Replica != "r1" {
+		t.Errorf("event 0 = %+v, want game-injector/r1", events[0])
+	}
+	if events[0].Kind != "new-game" || events[0].Detail != "#0 flipper vs cooperator" {
+		t.Errorf("event 0 description = %q / %q", events[0].Kind, events[0].Detail)
+	}
+	if events[1].Replica != "r0" || events[1].Kind != "decision" {
+		t.Errorf("event 1 = %+v, want a decision from r0", events[1])
+	}
+	if events[1].Detail != "flipper cheats" {
+		t.Errorf("event 1 detail = %q, want %q", events[1].Detail, "flipper cheats")
+	}
+
+	wins := tr.Snapshot().Wins
+	if wins["game-injector/r1"] != 1 || wins["flipper/r0"] != 1 {
+		t.Errorf("wins = %v", wins)
+	}
+}
+
+func TestEventFeedIsBounded(t *testing.T) {
+	tr := newTracker(0)
+	seq := int64(0)
+	for i := 0; i < eventFeed+20; i++ {
+		seq = playGame(tr, seq, fsm.Flipper, fsm.Cooperator, fsm.Cheat, fsm.Cooperate)
+	}
+	events := tr.Snapshot().Events
+	if len(events) != eventFeed {
+		t.Fatalf("feed has %d events, want %d", len(events), eventFeed)
+	}
+	if last := events[len(events)-1].Seq; last != seq-1 {
+		t.Errorf("feed ends at seq %d, want %d", last, seq-1)
+	}
+	for i := 1; i < len(events); i++ {
+		if events[i].Seq != events[i-1].Seq+1 {
+			t.Fatalf("feed has a gap at %d: %d then %d", i, events[i-1].Seq, events[i].Seq)
+		}
+	}
+}
+
+// Everything published in a snapshot must be a copy, or a reader holding what it
+// believes is an immutable view watches it change.
+func TestSnapshotCollectionsAreCopies(t *testing.T) {
+	tr := newTracker(0)
+	seq := playGame(tr, 0, fsm.Flipper, fsm.Cooperator, fsm.Cheat, fsm.Cooperate)
+	early := tr.Snapshot()
+
+	if early.CurrentGame != nil {
+		t.Fatal("a completed game left something in flight")
+	}
+	playGame(tr, seq, fsm.Retaliator, fsm.CopyLeader, fsm.Cheat, fsm.Cheat)
+
+	if len(early.Events) != 3 {
+		t.Errorf("an earlier snapshot's feed grew to %d events", len(early.Events))
+	}
+	if early.Wins["test/r0"] != 3 {
+		t.Errorf("an earlier snapshot's wins changed to %v", early.Wins)
+	}
+	if tr.Snapshot().Version <= early.Version {
+		t.Error("Version did not advance")
+	}
+}
+
+func TestSnapshotPublishesTheGameInFlight(t *testing.T) {
+	tr := newTracker(0)
+	tr.HandleEvent(sequenced(0, fsm.NewGame{Id: 0, StrategyA: fsm.Flipper, StrategyB: fsm.Cooperator}))
+
+	published := tr.Snapshot()
+	if published.CurrentGame == nil {
+		t.Fatal("no game in flight published")
+	}
+	if got := published.CurrentGame.NextToMove(); got != fsm.Flipper {
+		t.Errorf("NextToMove = %q, want flipper", got)
+	}
+
+	tr.HandleEvent(sequenced(1, fsm.GameDecision{Strategy: fsm.Flipper, Decision: fsm.Cheat}))
+	if published.CurrentGame.DecisionA != nil {
+		t.Error("the published copy changed when the store did")
+	}
+	if got := tr.Snapshot().CurrentGame.NextToMove(); got != fsm.Cooperator {
+		t.Errorf("NextToMove after flipper moved = %q, want cooperator", got)
+	}
 }

@@ -30,6 +30,8 @@ type Sequencer struct {
 	// the same logical decision, so the first to arrive is admitted and the second
 	// is dropped as a duplicate. The race is resolved per event, not per replica.
 	senderSeqHwm map[string]int64
+	// pacer optionally throttles admission. Nil means flat out.
+	pacer *Pacer
 }
 
 func NewSequencer() *Sequencer {
@@ -40,6 +42,11 @@ func NewSequencer() *Sequencer {
 		sequence:     0,
 		senderSeqHwm: make(map[string]int64),
 	}
+}
+
+// SetPacer throttles admission. Must be called before Run.
+func (s *Sequencer) SetPacer(pacer *Pacer) {
+	s.pacer = pacer
 }
 
 // IngressCh is the channel components publish to. Handed to each component so it
@@ -85,7 +92,12 @@ func (s *Sequencer) Run(ctx context.Context) {
 			sub.client.onReplayComplete()
 		case event := <-s.ingressCh.Out():
 			if !s.admit(event) {
+				// Rejected duplicates are not paced: the sibling replica's copy
+				// of an event should not cost the viewer a tick.
 				continue
+			}
+			if s.pacer != nil && !s.pacer.Wait(ctx) {
+				return
 			}
 
 			// Sequence onto a copy. The sender still holds the original as its

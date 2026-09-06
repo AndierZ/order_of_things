@@ -38,18 +38,18 @@ func NewGameInjector(
 	seed int64,
 	maxGames int,
 	sequencer *platform.Sequencer,
+	validator platform.StateValidator,
 ) *GameInjector {
 	t := &GameInjector{
 		seed:      seed,
 		maxGames:  maxGames,
 		gameStore: fsm.NewGameStore(),
 	}
-	t.eventloop = platform.NewEventloop(
-		Component,
-		replicaId,
-		sequencer,
-		t.HandleEvent,
-	)
+	opts := make([]platform.Option, 0, 1)
+	if validator != nil {
+		opts = append(opts, platform.WithStateValidation(t.StateHash, validator))
+	}
+	t.eventloop = platform.NewEventloop(Component, replicaId, sequencer, t.HandleEvent, opts...)
 	return t
 }
 

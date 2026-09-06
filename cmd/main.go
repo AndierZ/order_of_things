@@ -24,6 +24,8 @@ func main() {
 		replicas = flag.Int("replicas", 2, "instances of every component; 2 is active-active")
 		goldPath = flag.String("golden", "testdata/golden.json", "golden outcome store; empty for none")
 		bug      = flag.String("bug", "", "inject a determinism bug into one replica, as component/replica (e.g. flipper/r1)")
+		defect   = flag.String("defect", "clock", "which bug to inject: clock (wrong decisions) or payoff (wrong state)")
+		interval = flag.Duration("interval", 0, "pace admission, one event per interval; 0 runs flat out")
 		quiet    = flag.Bool("quiet", false, "suppress the platform's own logging")
 	)
 	flag.Parse()
@@ -32,25 +34,79 @@ func main() {
 		log.SetOutput(io.Discard)
 	}
 
-	cfg := session.Config{Seed: *seed, Games: *games, Replicas: *replicas}
+	cfg := session.Config{
+		Seed: *seed, Games: *games, Replicas: *replicas, Interval: *interval,
+	}
 	if *bug != "" {
 		component, replica, err := parseBug(*bug)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)
 		}
-		cfg.Bug = &session.Bug{Component: component, Replica: replica, ImpureClock: true}
+		injected, err := parseDefect(*defect)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		cfg.Bug = &session.Bug{Component: component, Replica: replica, Defect: injected}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
+	// A defective replica is only caught by the state-root chain if there is one
+	// to compare against, so establish the reference before running.
+	store, err := golden.Open(*goldPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if cfg.Bug != nil && cfg.Bug.CorruptPayoff {
+		if cfg.Reference, err = reference(ctx, store, cfg); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+
 	result := session.New(cfg).Run(ctx)
 	report(os.Stdout, result)
 
-	if err := verify(*goldPath, result); err != nil {
+	if err := verify(store, result); err != nil {
 		fmt.Fprintf(os.Stderr, "\n%v\n", err)
 		os.Exit(1)
+	}
+}
+
+// reference establishes the canonical chain for a seed by running the tournament
+// clean, so that a defective replica has something independent to be checked
+// against. The pair alone cannot do this: two replicas sharing a defect agree
+// with each other while both being wrong.
+func reference(ctx context.Context, store *golden.Store, cfg session.Config) (*golden.Validator, error) {
+	if validator := store.Validator(cfg.Seed, cfg.Games); validator != nil {
+		return validator, nil
+	}
+	clean := session.New(session.Config{Seed: cfg.Seed, Games: cfg.Games, Replicas: 1}).Run(ctx)
+	if clean.Games != cfg.Games {
+		return nil, fmt.Errorf("reference run reached only %d of %d games", clean.Games, cfg.Games)
+	}
+	if err := store.Record(clean.Golden()); err != nil {
+		return nil, err
+	}
+	return store.Validator(cfg.Seed, cfg.Games), nil
+}
+
+func parseDefect(name string) (session.Defect, error) {
+	switch name {
+	case "clock":
+		// Wrong decisions, right state. Caught by comparing this replica's
+		// emissions against what the log recorded.
+		return session.Defect{ImpureClock: true}, nil
+	case "payoff":
+		// Right decisions, wrong state. Invisible to the pair; caught only by the
+		// canonical chain.
+		return session.Defect{CorruptPayoff: true}, nil
+	default:
+		return session.Defect{}, fmt.Errorf("bad -defect %q: want clock or payoff", name)
 	}
 }
 
@@ -76,16 +132,11 @@ func report(w io.Writer, result session.Result) {
 
 	if len(result.Quarantined) > 0 {
 		fmt.Fprintf(w, "\nquarantined: %v\n", result.Quarantined)
-		fmt.Fprintln(w, "one half of a pair disagreed with the other and refused to keep serving.")
-		fmt.Fprintln(w, "this proves they diverged, not which half was right.")
+		fmt.Fprintln(w, "a replica refused to keep serving after disagreeing with what the log recorded.")
 	}
 }
 
-func verify(path string, result session.Result) error {
-	store, err := golden.Open(path)
-	if err != nil {
-		return err
-	}
+func verify(store *golden.Store, result session.Result) error {
 	recorded, existed := store.Get(result.Seed, result.Games)
 
 	if err := store.Verify(result.Golden()); err != nil {

@@ -79,17 +79,46 @@ type Config struct {
 	// one game is ever in flight and the two reads agree on every decision. This
 	// one diverges immediately, which is what makes the quarantine path
 	// demonstrable before v2 exists.
+	//
+	// It corrupts what the replica *decides*, not what it computes, so it is
+	// caught by comparing emissions against the log -- and deliberately not by
+	// the state-root chain, which this replica satisfies perfectly.
 	ImpureClock bool
+
+	// CorruptPayoff corrupts what the replica *computes*: it mis-applies scores
+	// while its emissions stay plausible. Nothing in the pair can catch this,
+	// because a second replica running the same defect would agree with it. Only
+	// the canonical chain, established before either ran, can.
+	CorruptPayoff bool
+	// CorruptFromGame delays the corruption so a restarting replica replays
+	// correctly for a while and then diverges at a visible point.
+	CorruptFromGame int64
+
+	// Validator checks this replica's state root against the canonical chain
+	// after every applied event, including during replay. Nil disables the check.
+	Validator platform.StateValidator
 }
 
 // New builds a replica of the given strategy.
 func New(self fsm.Strategy, replicaId string, sequencer *platform.Sequencer, cfg Config) *Player {
+	store := fsm.NewGameStore()
+	if cfg.CorruptPayoff {
+		store = fsm.NewGameStoreWithBug(fsm.Bug{
+			CorruptPayoff: true,
+			FromGame:      cfg.CorruptFromGame,
+		})
+	}
 	p := &Player{
 		self:      self,
 		decide:    DecideFor(self, cfg),
-		gameStore: fsm.NewGameStore(),
+		gameStore: store,
 	}
-	p.eventloop = platform.NewEventloop(string(self), replicaId, sequencer, p.HandleEvent)
+
+	opts := make([]platform.Option, 0, 1)
+	if cfg.Validator != nil {
+		opts = append(opts, platform.WithStateValidation(p.StateHash, cfg.Validator))
+	}
+	p.eventloop = platform.NewEventloop(string(self), replicaId, sequencer, p.HandleEvent, opts...)
 	return p
 }
 

@@ -7,10 +7,14 @@
 // exist in the same process, which is exactly the case that has failed if the
 // process died.
 //
-// So one small thing is durable: for seed X over N games, the canonical final
-// state root is H. That is enough for a fresh session to prove it reproduced a
-// previous run, and enough to catch a replica whose divergence changed the
-// outcome rather than merely being detected in flight.
+// So one small thing is durable: for seed X over N games, the canonical state
+// root at every position in the stream. Not just the final one -- a replica that
+// is part way through replaying needs to be checked where it currently is, and
+// waiting until it finishes to find out it was wrong at event three defeats the
+// purpose of checking before it rejoins.
+//
+// The chain is small: three events per game, eight bytes each, so a hundred-game
+// tournament is a couple of kilobytes.
 package golden
 
 import (
@@ -30,6 +34,56 @@ type Outcome struct {
 	Games       int                    `json:"games"`
 	StateHash   uint64                 `json:"stateHash"`
 	Leaderboard []fsm.LeaderboardEntry `json:"leaderboard"`
+	// Chain is the state root after each event, indexed by sequence number. A
+	// replica that has replayed up to seq N is checked against Chain[N].
+	Chain []uint64 `json:"chain,omitempty"`
+}
+
+// RootAt returns the canonical state root after the event at seq, and false if
+// the reference does not reach that far.
+func (o Outcome) RootAt(seq int64) (uint64, bool) {
+	if seq < 0 || seq >= int64(len(o.Chain)) {
+		return 0, false
+	}
+	return o.Chain[seq], true
+}
+
+// DivergenceError reports that a replica's replayed state does not match the
+// canonical chain. Unlike a disagreement between two live replicas, this does
+// say which side is wrong: the reference was computed before either replica ran.
+type DivergenceError struct {
+	Seed     int64
+	Seq      int64
+	Expected uint64
+	Got      uint64
+}
+
+func (e *DivergenceError) Error() string {
+	return fmt.Sprintf(
+		"replayed state diverges from the canonical chain for seed %d at seq %d: state root %016x, want %016x",
+		e.Seed, e.Seq, e.Got, e.Expected,
+	)
+}
+
+// Validator checks a replica's state root against the canonical chain as it
+// replays. A replica that fails is refused rejoin rather than being allowed to
+// serve, which is the point of checking at all.
+type Validator struct {
+	outcome Outcome
+}
+
+// Validate reports whether the state root a replica computed after applying the
+// event at seq matches the canonical one. Positions past the end of the chain
+// are not an error: a session may legitimately run beyond the reference.
+func (v *Validator) Validate(seq int64, root uint64) error {
+	if v == nil {
+		return nil
+	}
+	expected, ok := v.outcome.RootAt(seq)
+	if !ok || expected == root {
+		return nil
+	}
+	return &DivergenceError{Seed: v.outcome.Seed, Seq: seq, Expected: expected, Got: root}
 }
 
 func (o Outcome) key() string { return fmt.Sprintf("%d:%d", o.Seed, o.Games) }
@@ -91,6 +145,17 @@ func (s *Store) Get(seed int64, games int) (Outcome, bool) {
 	return outcome, ok
 }
 
+// Validator returns a checker for the canonical chain of a seed, or nil if there
+// is no reference for it. A nil Validator passes everything, so callers do not
+// have to special-case the first run of a seed.
+func (s *Store) Validator(seed int64, games int) *Validator {
+	outcome, ok := s.Get(seed, games)
+	if !ok || len(outcome.Chain) == 0 {
+		return nil
+	}
+	return &Validator{outcome: outcome}
+}
+
 // Verify checks a run against the canonical record, recording it as canonical if
 // this is the first run for that seed. First run wins: there is nothing to
 // arbitrate against, so the first observation defines the reference and every
@@ -111,6 +176,16 @@ func (s *Store) Verify(got Outcome) error {
 		return &MismatchError{Golden: existing, Got: got}
 	}
 	return nil
+}
+
+// Record stores an outcome as canonical, replacing any existing record. Used
+// when a session pre-generates its own reference, where there is nothing to
+// verify against and the point is to establish the reference in the first place.
+func (s *Store) Record(outcome Outcome) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.outcomes[outcome.key()] = outcome
+	return s.flushLocked()
 }
 
 // flushLocked writes the whole store to disk. The caller must hold s.mu.

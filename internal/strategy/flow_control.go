@@ -13,14 +13,5 @@ import "order_of_things/internal/fsm"
 // different log. None of the strategies read the in-flight game's decisions, so
 // deciding second confers no advantage.
 func ShouldRespond(currentGame *fsm.Game, s fsm.Strategy) bool {
-	if currentGame == nil {
-		return false
-	}
-	if currentGame.DecisionA == nil {
-		return currentGame.StrategyA == s
-	}
-	if currentGame.DecisionB == nil {
-		return currentGame.StrategyB == s
-	}
-	return false
+	return currentGame.NextToMove() == s && s != ""
 }

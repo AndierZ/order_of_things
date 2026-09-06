@@ -104,7 +104,8 @@ func TestImpureReplicaIsQuarantined(t *testing.T) {
 
 	s := session.New(session.Config{
 		Seed: 42, Games: 60, Replicas: 2,
-		Bug: &session.Bug{Component: "flipper", Replica: "r1", ImpureClock: true},
+		Bug: &session.Bug{Component: "flipper", Replica: "r1",
+			Defect: session.Defect{ImpureClock: true}},
 	})
 	result := s.Run(ctx)
 
@@ -133,7 +134,8 @@ func TestQuarantinedReplicaMayNotRejoin(t *testing.T) {
 
 	s := session.New(session.Config{
 		Seed: 42, Games: 60, Replicas: 2,
-		Bug: &session.Bug{Component: "flipper", Replica: "r1", ImpureClock: true},
+		Bug: &session.Bug{Component: "flipper", Replica: "r1",
+			Defect: session.Defect{ImpureClock: true}},
 	})
 	result := s.Run(ctx)
 

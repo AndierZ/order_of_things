@@ -416,3 +416,53 @@ func TestWatermarkScopedReads(t *testing.T) {
 		}
 	})
 }
+
+func TestNextToMove(t *testing.T) {
+	cooperated := Cooperate
+	game := func(a, b *Decision) *Game {
+		return &Game{StrategyA: Cooperator, DecisionA: a, StrategyB: Flipper, DecisionB: b}
+	}
+	tests := []struct {
+		name string
+		game *Game
+		want Strategy
+	}{
+		{"no game", nil, ""},
+		{"a moves first", game(nil, nil), Cooperator},
+		{"b moves once a has", game(&cooperated, nil), Flipper},
+		{"nobody once both have", game(&cooperated, &cooperated), ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.game.NextToMove(); got != tc.want {
+				t.Errorf("NextToMove = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A published snapshot must not change when the store moves on, so the game in
+// flight has to be copied out rather than shared.
+func TestCloneIsIndependentOfTheStore(t *testing.T) {
+	store := NewGameStore()
+	store.ApplyEvent(0, NewGame{Id: 0, StrategyA: Cooperator, StrategyB: Flipper})
+	published := store.CurrentGame().Clone()
+
+	store.ApplyEvent(1, GameDecision{Strategy: Cooperator, Decision: Cheat})
+
+	if published.DecisionA != nil {
+		t.Error("a decision applied after cloning appeared in the clone")
+	}
+	if store.CurrentGame().DecisionA == nil {
+		t.Error("the store did not record the decision")
+	}
+	if (*Game)(nil).Clone() != nil {
+		t.Error("cloning nil did not give nil")
+	}
+
+	// And mutating a clone must not reach back into the store.
+	published.StrategyA = Retaliator
+	if store.CurrentGame().StrategyA != Cooperator {
+		t.Error("mutating a clone changed the store")
+	}
+}

@@ -93,7 +93,7 @@ type GameStore struct {
 	bug            *Bug
 }
 
-// Bug corrupts a store's transition function on purpose, so the state-root chain
+// Bug corrupts a store's transition function on purpose, so the state-checksum chain
 // has something real to catch.
 //
 // This is a different class of defect from a strategy that decides badly. A bad
@@ -378,19 +378,28 @@ func rank(scores map[Strategy]int) []LeaderboardEntry {
 // State hashing. A replica that restarts replays the log and chains a hash of its
 // materialized state at every step; comparing that chain against a replica that
 // stayed up -- or against a stored golden outcome -- decides whether it is safe
-// to let it rejoin. This mirrors state-root verification in replicated ledgers,
+// to let it rejoin. This mirrors state-checksum verification in replicated ledgers,
 // where a node proves it computed the same state before it is trusted.
 //
 // It is a chain rather than a hash of the final state on purpose. Two replicas
 // that end up in the same place having disagreed along the way are still a bug,
 // and a chain catches that; a snapshot hash would not.
+//
+// It is a checksum, not a Merkle root, and the distinction is the threat model.
+// FNV-1a is not a cryptographic hash: it is fast, it has good avalanche, and it
+// is trivial to find a collision for on purpose. That is fine here, because the
+// thing being defended against is a replica that computes the wrong answer by
+// accident -- a bad deploy, a stray time.Now, environment drift. It would be
+// worth nothing against a replica trying to *pass*: forging a matching checksum
+// for a chosen wrong state is easy. A Byzantine threat model would want a
+// cryptographic hash and signatures over the chain, which is a different project.
 
 const (
 	offset64 = 14695981039346656037
 	prime64  = 1099511628211
 )
 
-// StateHash is the chained state root as of the last applied event.
+// StateHash is the chained state checksum as of the last applied event.
 func (g *GameStore) StateHash() uint64 { return g.stateHash }
 
 // rehash folds a hash of the current materialized state into the chain. Only

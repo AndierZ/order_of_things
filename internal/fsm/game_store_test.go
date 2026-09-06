@@ -294,7 +294,7 @@ func TestReplayReproducesIdenticalState(t *testing.T) {
 	}
 }
 
-// The state root is what a restarting replica is checked against, so it has to
+// The state checksum is what a restarting replica is checked against, so it has to
 // distinguish any two histories that should not be considered equivalent.
 func TestStateHashAdvancesWithTheStream(t *testing.T) {
 	store := NewGameStore()
@@ -310,7 +310,7 @@ func TestStateHashAdvancesWithTheStream(t *testing.T) {
 			store.ApplyEvent(seq, payload)
 			seq++
 			if hash := store.StateHash(); seen[hash] {
-				t.Fatalf("state root %016x repeated at seq %d", hash, seq)
+				t.Fatalf("state checksum %016x repeated at seq %d", hash, seq)
 			} else {
 				seen[hash] = true
 			}
@@ -332,12 +332,12 @@ func TestIdenticalHistoriesProduceIdenticalStateRoots(t *testing.T) {
 	apply(replayed, history...)
 
 	if live.StateHash() != replayed.StateHash() {
-		t.Errorf("replay produced state root %016x, live has %016x", replayed.StateHash(), live.StateHash())
+		t.Errorf("replay produced state checksum %016x, live has %016x", replayed.StateHash(), live.StateHash())
 	}
 	// And it is stable across repeated computation, not just within one run.
 	for i := 0; i < 100; i++ {
 		if live.StateHash() != replayed.StateHash() {
-			t.Fatalf("state roots diverged on read %d", i)
+			t.Fatalf("state checksums diverged on read %d", i)
 		}
 	}
 }
@@ -358,7 +358,7 @@ func TestStateHashCatchesDivergenceThatEndsInTheSamePlace(t *testing.T) {
 		t.Fatal("test setup: the two histories should end on the same scores")
 	}
 	if honest.StateHash() == diverged.StateHash() {
-		t.Error("two different histories produced the same state root")
+		t.Error("two different histories produced the same state checksum")
 	}
 }
 

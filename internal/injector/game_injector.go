@@ -63,7 +63,7 @@ func (t *GameInjector) GameStore() *fsm.GameStore {
 	return t.gameStore
 }
 
-// StateHash is the chained state root as of the last event this replica applied.
+// StateHash is the chained state checksum as of the last event this replica applied.
 // Only safe once its event loop has stopped.
 func (t *GameInjector) StateHash() uint64 {
 	return t.gameStore.StateHash()

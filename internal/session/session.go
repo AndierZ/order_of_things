@@ -28,7 +28,7 @@ import (
 //	               pair disagreed; cannot say which half was right.
 //	CorruptPayoff  right decisions, wrong state -> invisible to the pair, since a
 //	               sibling with the same defect would agree. Caught by the
-//	               canonical state-root chain, which does say which is wrong,
+//	               canonical state-checksum chain, which does say which is wrong,
 //	               because the reference was computed before either replica ran.
 type Defect struct {
 	// WrongDecision makes the replica answer the opposite of the honest answer,
@@ -88,7 +88,7 @@ type Config struct {
 	// Interval paces admission, one event per interval. Zero runs flat out,
 	// which is what headless reference runs and tests want.
 	Interval time.Duration
-	// Reference is the canonical state-root chain every replica is checked
+	// Reference is the canonical state-checksum chain every replica is checked
 	// against as it applies events. Nil disables the check, which is what the
 	// run that generates the reference has to do.
 	Reference *golden.Validator
@@ -110,7 +110,7 @@ func (c Config) withDefaults() Config {
 }
 
 // component is what the session supervises. Every component is the same shape:
-// an event loop over the sequenced stream, plus a state root it can be checked
+// an event loop over the sequenced stream, plus a state checksum it can be checked
 // against.
 type component interface {
 	Run(ctx context.Context) error
@@ -390,7 +390,7 @@ func (s *Session) shutdown() Result {
 	s.mu.Unlock()
 	<-s.sequencerDone
 
-	// Rebuild the state-root chain from the log. Doing it here rather than
+	// Rebuild the state-checksum chain from the log. Doing it here rather than
 	// having the tracker accumulate it keeps the chain a property of the log,
 	// which is what a replaying replica is actually checked against.
 	replay := fsm.NewGameStore()

@@ -54,7 +54,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	// A defective replica is only caught by the state-root chain if there is one
+	// A defective replica is only caught by the state-checksum chain if there is one
 	// to compare against, so establish the reference before running.
 	store, err := golden.Open(*goldPath)
 	if err != nil {
@@ -121,7 +121,7 @@ func parseBug(spec string) (component, replica string, err error) {
 
 func report(w io.Writer, result session.Result) {
 	fmt.Fprintf(w, "seed %d, %d games, %d events\n", result.Seed, result.Games, result.LogLength)
-	fmt.Fprintf(w, "state root %016x\n\n", result.StateHash)
+	fmt.Fprintf(w, "state checksum %016x\n\n", result.StateHash)
 
 	table := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(table, "STRATEGY\tSCORE")

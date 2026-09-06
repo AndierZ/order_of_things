@@ -88,10 +88,10 @@ func rehearse(candidate component, replica string, reference *golden.Validator) 
 		}
 
 		// The decision function may be fine while the transition function is not,
-		// so the state root is checked at every step as well.
+		// so the state checksum is checked at every step as well.
 		if root, ok := reference.Root(entry.Seq); ok && candidate.StateHash() != root {
 			return &RehearsalError{replica, entry.Seq, fmt.Sprintf(
-				"state root %016x, canonical is %016x", candidate.StateHash(), root)}
+				"state checksum %016x, canonical is %016x", candidate.StateHash(), root)}
 		}
 	}
 

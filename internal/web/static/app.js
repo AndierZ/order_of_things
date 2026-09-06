@@ -440,7 +440,7 @@ function paintStatus() {
   $("step").disabled = s.done;
 
   if (s.done) {
-    banner(`Tournament complete — ${s.completed} games, state root ${s.stateHash}. Same result, whatever you did to it.`, true);
+    banner(`Tournament complete — ${s.completed} games, state checksum ${s.stateHash}. Same result, whatever you did to it.`, true);
   } else if (s.stalled) {
     banner(`Stalled: no live replica of ${s.waitingOn}. Nothing can happen until one comes back — restart either half.`, false);
   } else {

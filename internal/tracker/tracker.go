@@ -139,7 +139,7 @@ func (t *Tracker) Done() <-chan struct{} { return t.done }
 // GameStore exposes the underlying store. Only safe once Run has returned.
 func (t *Tracker) GameStore() *fsm.GameStore { return t.gameStore }
 
-// StateHash is the chained state root as of the last event applied. Prefer
+// StateHash is the chained state checksum as of the last event applied. Prefer
 // Snapshot for live reads; this is only safe once Run has returned.
 func (t *Tracker) StateHash() uint64 { return t.gameStore.StateHash() }
 

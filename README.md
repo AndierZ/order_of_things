@@ -74,7 +74,7 @@ from the same events everyone else saw.
 **Verification before trust.** This is the part that makes it a debugger rather
 than a runtime, and it is worth being exact about what it needs. A candidate
 replica replays the *entire* canonical tournament in private — every event, every
-emission, every state root — before it is connected to anything, and is refused
+emission, every state checksum — before it is connected to anything, and is refused
 if it diverges anywhere. Not "we noticed later" — refused at the door, at the
 exact event where it first went wrong:
 
@@ -104,10 +104,18 @@ having a known answer possible at all.
 The three checks in this project need quite different things, and only two of
 them generalise to a running system:
 
+These are checksums, not Merkle roots. FNV-1a is fast and has good avalanche, and
+it is trivial to find a collision for deliberately — which is fine, because what
+is being defended against is a replica that computes the wrong answer *by
+accident*: a bad deploy, a stray `time.Now`, environment drift. It would be worth
+nothing against a replica trying to pass. **The threat model is bugs, not
+Byzantine replicas**; that one would want a cryptographic hash and signatures over
+the chain, and is a different project.
+
 | check | needs | catches | live? |
 |---|---|---|---|
 | emission comparison | a live sibling | that they disagreed — never which is wrong | yes |
-| state root vs. the log so far | a reference for the past | a corrupted transition function | yes |
+| state checksum vs. the log so far | a reference for the past | a corrupted transition function | yes |
 | rehearsal vs. the canonical run | a recorded canonical trace | anything that would ever diverge | no — pre-deployment |
 
 **Cheap redundancy.** Active-active is normally hard: you cannot re-run
@@ -124,7 +132,7 @@ is why more than one mechanism exists:
 | defect | what it corrupts | caught by |
 |---|---|---|
 | `WrongDecision` | the **decision** function, always | rehearsal, every time — this is what the UI injects |
-| `CorruptPayoff` | the **transition** function | the canonical state-root chain |
+| `CorruptPayoff` | the **transition** function | the canonical state-checksum chain |
 | `ImpureClock` | the decision function, *intermittently* | rehearsal, usually — and see below |
 
 A bad decision is invisible to the chain: a replica deciding wrongly still
@@ -220,7 +228,7 @@ this build.
 
 That is less defeatist than it sounds, and it is the reason the rest of the
 machinery is worth having. Manual reconciliation is *tractable* against a single
-ordered log that replays deterministically from any point with a state root at
+ordered log that replays deterministically from any point with a state checksum at
 every step: you can find where it went wrong, replay both sides of it, and see
 exactly what diverged. It is close to hopeless against a distributed system where
 the interleaving is gone and every node has a slightly different story. The
@@ -253,13 +261,13 @@ go test -race ./...
 ### The committed tournament
 
 `testdata/golden.json` holds the canonical tournament — its full event log, the
-state root after every event, and the final standings. It is checked in, and it is
+state checksum after every event, and the final standings. It is checked in, and it is
 a **regression fixture, not a cache**. Change a payoff, a strategy, the pairing
 draw or the hashing scheme and this fails:
 
 ```
 this build produces a different tournament than the committed one:
-  state root b6321599e4be266b, committed 1b034db9c4c9e1ca
+  state checksum b6321599e4be266b, committed 1b034db9c4c9e1ca
   leaderboard [{copy-leader 28} {flipper 24} …], committed [{copy-leader 26} …]
 ```
 
@@ -291,7 +299,7 @@ the same state machine, not a dashboard bolted onto it.
 
 ```
 internal/platform   sequencer, client, event loop, pacer — knows nothing of games
-internal/fsm        the replicated state machine and its state-root chain
+internal/fsm        the replicated state machine and its state-checksum chain
 internal/injector   admission policy: when a game may start
 internal/strategy   the four decision functions
 internal/tracker    scores read model and the UI event feed
@@ -339,6 +347,41 @@ with a log line rather than waited on, because blocking turns one stuck session
 into a stuck server: the reclaim loop would never tick again and nothing would
 ever be reclaimed after the first hang. Leaking a few goroutines is bounded by
 how often that happens; wedging the reclaimer is bounded by nothing.
+
+## What v2 would actually take
+
+The design doc says v2 changes only the injector's admission policy and leaves
+the state machines alone. That is not true of this build, and the difference is
+worth being straight about.
+
+The admission rule itself is small — "a game may start when both its participants
+are free" rather than "when the previous one has resolved" — but it has a trap in
+it. Taken literally it reorders games: if `G7` is blocked and `G8` is not, `G8`
+starts first, and a player in both sees its own history in a different order,
+which changes what it decides and breaks the v1/v2 outcome diff before the
+comparison is even run. The rule needs head-of-line reservation, so a skipped
+game reserves its participants and nothing containing them can jump the queue.
+
+The larger part is not the injector at all:
+
+- **The store holds one game.** `GameStore` deliberately permits a single game in
+  flight and panics otherwise, and every strategy reads one `CurrentGame`. v2
+  needs a multi-game store and per-strategy dependency views.
+- **One emission per event stops being enough.** Two games can become admissible
+  on the same event, and the event loop returns one payload.
+- **The log stops being reproducible.** Admission still depends only on the
+  applied prefix, so replicas still agree — but *which* prefix exists at a given
+  moment depends on which concurrent game resolves first. The outcome stays
+  deterministic; the log does not.
+- **Which means the state checksum chain, and rehearsal with it, do not survive.**
+  The chain folds in applied sequence and completion order, so it differs run to
+  run. v2 needs an order-independent outcome digest, and there is no canonical log
+  to rehearse a candidate against — leaving only the two live checks, and losing
+  the one that could say which replica was wrong.
+
+So v2 buys throughput and costs the strongest verification mechanism here. That
+trade is more interesting than the speed number, and it is not one the design doc
+anticipated.
 
 ## Deliberate non-goals
 

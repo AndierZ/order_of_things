@@ -43,7 +43,7 @@ var ErrTooManySessions = errors.New("session: too many sessions in progress")
 // restarting them, letting a corrupted one try to rejoin -- with every component
 // on its own goroutine and no coordination beyond the order of the log.
 //
-// Fixing it also buys something concrete: one canonical state-root chain,
+// Fixing it also buys something concrete: one canonical state-checksum chain,
 // generated once, that every session can check a recovering replica against.
 const CanonicalSeed = 20260906
 
@@ -115,7 +115,7 @@ func NewRegistry(store *golden.Store) *Registry {
 	}
 }
 
-// Prepare generates the canonical state-root chain up front, so the first session
+// Prepare generates the canonical state-checksum chain up front, so the first session
 // does not pay for it and every session -- including one whose replicas are being
 // restarted seconds after it starts -- has something to check a recovering
 // replica against from its very first event.
@@ -285,7 +285,7 @@ func (r *Registry) reference(ctx context.Context, seed int64, games int) (*golde
 		// -- the rules changed -- and it wants regenerating deliberately, so it is
 		// reported rather than quietly overwritten.
 		log.Printf("golden: this build does not reproduce the recorded tournament for seed %d: "+
-			"state root %016x, recorded %016x. The recorded one is stale; regenerate it with "+
+			"state checksum %016x, recorded %016x. The recorded one is stale; regenerate it with "+
 			"`go test ./internal/session -run Golden -update`.", seed, fresh.StateHash, recorded.StateHash)
 	}
 

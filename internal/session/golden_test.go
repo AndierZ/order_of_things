@@ -55,7 +55,7 @@ func TestGoldenCanonicalTournament(t *testing.T) {
 		if err := store.Record(produced); err != nil {
 			t.Fatalf("recording: %v", err)
 		}
-		t.Logf("wrote %s: seed %d, %d games, state root %016x",
+		t.Logf("wrote %s: seed %d, %d games, state checksum %016x",
 			goldenPath, produced.Seed, produced.Games, produced.StateHash)
 		return
 	}
@@ -76,12 +76,12 @@ func TestGoldenCanonicalTournament(t *testing.T) {
 
 	if recorded.StateHash != produced.StateHash {
 		t.Errorf("this build produces a different tournament than the committed one:\n"+
-			"  state root %016x, committed %016x\n"+
+			"  state checksum %016x, committed %016x\n"+
 			"  leaderboard %v, committed %v\n"+
 			"If that was intended, regenerate with `go test ./internal/session -run Golden -update`.",
 			produced.StateHash, recorded.StateHash, produced.Leaderboard, recorded.Leaderboard)
 	}
-	// The state root chains every applied state, so a mismatch above would catch
+	// The state checksum chains every applied state, so a mismatch above would catch
 	// any divergence. These compare the rest of the record, which the root does
 	// not cover: a change in the shape of what is stored rather than in what the
 	// tournament did.

@@ -53,7 +53,7 @@ func TestTournamentSurvivesLosingHalfOfEveryPair(t *testing.T) {
 		t.Fatalf("completed %d of 60 games after losing half of every pair", result.Games)
 	}
 	if result.StateHash != reference.StateHash {
-		t.Errorf("state root %016x after failover, want %016x", result.StateHash, reference.StateHash)
+		t.Errorf("state checksum %016x after failover, want %016x", result.StateHash, reference.StateHash)
 	}
 	if len(result.Quarantined) != 0 {
 		t.Errorf("killing a replica quarantined something: %v", result.Quarantined)
@@ -88,7 +88,7 @@ func TestKilledReplicaReplaysAndRejoins(t *testing.T) {
 		t.Fatalf("completed %d of 60 games", result.Games)
 	}
 	if result.StateHash != reference.StateHash {
-		t.Errorf("state root %016x after replay and rejoin, want %016x", result.StateHash, reference.StateHash)
+		t.Errorf("state checksum %016x after replay and rejoin, want %016x", result.StateHash, reference.StateHash)
 	}
 	if len(result.Quarantined) != 0 {
 		t.Errorf("a healthy replica was quarantined on rejoin: %v", result.Quarantined)
@@ -328,7 +328,7 @@ func TestGoldenOutcomeRoundTripsAcrossStores(t *testing.T) {
 		t.Fatal("nothing persisted for seed 42")
 	}
 	if recorded.StateHash != first.StateHash {
-		t.Errorf("persisted state root %016x, want %016x", recorded.StateHash, first.StateHash)
+		t.Errorf("persisted state checksum %016x, want %016x", recorded.StateHash, first.StateHash)
 	}
 
 	// A fresh run of the same seed validates against it.

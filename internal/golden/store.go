@@ -67,7 +67,7 @@ type Outcome struct {
 	Games       int                    `json:"games"`
 	StateHash   uint64                 `json:"stateHash"`
 	Leaderboard []fsm.LeaderboardEntry `json:"leaderboard"`
-	// Chain is the state root after each event, indexed by sequence number. A
+	// Chain is the state checksum after each event, indexed by sequence number. A
 	// replica that has replayed up to seq N is checked against Chain[N].
 	Chain []uint64 `json:"chain,omitempty"`
 	// Log is the canonical tournament in full. A replica rejoining is made to
@@ -78,7 +78,7 @@ type Outcome struct {
 	Log []Event `json:"log,omitempty"`
 }
 
-// RootAt returns the canonical state root after the event at seq, and false if
+// RootAt returns the canonical state checksum after the event at seq, and false if
 // the reference does not reach that far.
 func (o Outcome) RootAt(seq int64) (uint64, bool) {
 	if seq < 0 || seq >= int64(len(o.Chain)) {
@@ -99,12 +99,12 @@ type DivergenceError struct {
 
 func (e *DivergenceError) Error() string {
 	return fmt.Sprintf(
-		"replayed state diverges from the canonical chain for seed %d at seq %d: state root %016x, want %016x",
+		"replayed state diverges from the canonical chain for seed %d at seq %d: state checksum %016x, want %016x",
 		e.Seed, e.Seq, e.Got, e.Expected,
 	)
 }
 
-// Validator checks a replica's state root against the canonical chain as it
+// Validator checks a replica's state checksum against the canonical chain as it
 // replays. A replica that fails is refused rejoin rather than being allowed to
 // serve, which is the point of checking at all.
 type Validator struct {
@@ -126,7 +126,7 @@ func (v *Validator) Log() []Event {
 	return v.outcome.Log
 }
 
-// Root returns the canonical state root after the event at seq.
+// Root returns the canonical state checksum after the event at seq.
 func (v *Validator) Root(seq int64) (uint64, bool) {
 	if v == nil {
 		return 0, false
@@ -142,7 +142,7 @@ func (v *Validator) Seed() int64 {
 	return v.outcome.Seed
 }
 
-// Validate reports whether the state root a replica computed after applying the
+// Validate reports whether the state checksum a replica computed after applying the
 // event at seq matches the canonical one. Positions past the end of the chain
 // are not an error: a session may legitimately run beyond the reference.
 func (v *Validator) Validate(seq int64, root uint64) error {
@@ -167,7 +167,7 @@ type MismatchError struct {
 
 func (e *MismatchError) Error() string {
 	return fmt.Sprintf(
-		"outcome for seed %d over %d games does not match the golden record: state root %016x, want %016x",
+		"outcome for seed %d over %d games does not match the golden record: state checksum %016x, want %016x",
 		e.Got.Seed, e.Got.Games, e.Got.StateHash, e.Golden.StateHash,
 	)
 }

@@ -1,5 +1,38 @@
 # Deterministic Tournament Engine — Design & Requirements Doc
 
+> **This is the design record written before the build, kept as written.** It is
+> a snapshot of the thinking going in, not a description of what exists. Where
+> the build diverged it diverged deliberately, and `README.md` is authoritative
+> on what was actually built. The divergences worth knowing about:
+>
+> - **Random became Cooperator.** §2 and §5 list a Random strategy at tier 0.
+>   The build uses an always-cooperate strategy instead: it occupies the same
+>   tier — its decision reads nothing — without asking a reader to hold
+>   pseudo-randomness and global ordering in their head at the same time. The
+>   seeded-from-stream-position requirement in §3 still holds, and is satisfied
+>   by the injector's pairing draw, which is a pure function of (seed, game id)
+>   with no generator object anywhere.
+> - **"Actor" became "Strategy."** §2–§5 use "actor" for the thing a game is
+>   played between. That read as though it meant an individual replica, so the
+>   code calls it a strategy; replica identity lives in `Header.SenderId`.
+> - **More is persisted than §9 describes.** §9 says only the final outcome for a
+>   seed is durable. The build persists the whole canonical run — every event and
+>   a state checksum after each one — because a rejoining replica has to be
+>   checked against the *entire* tournament, not just its ending. See the README
+>   on why replaying only the log so far turned out not to be enough.
+> - **§7 and §12 understate what v2 needs.** Both say v2 changes only the
+>   injector and leaves the FSMs alone. That is not true of the build as it
+>   stands: the store deliberately permits exactly one game in flight and panics
+>   otherwise, and the strategies read a single `CurrentGame`. A real v2 needs a
+>   multi-game store and per-strategy dependency views as well as a new admission
+>   policy — the injector is the smallest part of it. v2 is out of scope; the
+>   README describes what it would actually take.
+> - **The state checksum is not a Merkle root.** §8 draws an analogy to state-root
+>   verification in blockchain systems, which is apt as prior art but not as a
+>   description of this implementation: the value here is an FNV-1a chain, good
+>   for catching accidental divergence and useless against an adversary. The
+>   threat model is bugs, not Byzantine replicas.
+
 **Context:** Anthropic SWE take-home assignment. Theme 1 (Exploration & Understanding) blended with Theme 3 (Systems & Reliability). Target: a self-contained, deployable prototype that makes distributed-systems concepts — determinism, replicated state machines, fault tolerance, dependency-aware concurrency — viscerally understandable without requiring the reviewer to bring domain expertise.
 
 ---

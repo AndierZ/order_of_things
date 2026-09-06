@@ -49,7 +49,7 @@ func TestPacingDoesNotChangeTheOutcome(t *testing.T) {
 	slow := session.New(session.Config{Seed: 42, Games: 20, Interval: 2 * time.Millisecond}).Run(ctx)
 
 	if slow.StateHash != fast.StateHash {
-		t.Errorf("paced run state root %016x, unpaced %016x", slow.StateHash, fast.StateHash)
+		t.Errorf("paced run state checksum %016x, unpaced %016x", slow.StateHash, fast.StateHash)
 	}
 	if slow.LogLength != fast.LogLength {
 		t.Errorf("paced run has %d events, unpaced %d", slow.LogLength, fast.LogLength)

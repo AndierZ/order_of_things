@@ -310,7 +310,7 @@ func TestStatusFrameCarriesEveryReplica(t *testing.T) {
 		t.Errorf("status games = %v, want 6", status["games"])
 	}
 	if _, ok := status["stateHash"].(string); !ok {
-		t.Errorf("status carried no state root: %v", status)
+		t.Errorf("status carried no state checksum: %v", status)
 	}
 }
 

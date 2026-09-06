@@ -82,7 +82,7 @@ type Config struct {
 	//
 	// It corrupts what the replica *decides*, not what it computes, so it is
 	// caught by comparing emissions against the log -- and deliberately not by
-	// the state-root chain, which this replica satisfies perfectly.
+	// the state-checksum chain, which this replica satisfies perfectly.
 	//
 	// Being nondeterministic, it is also not reliably caught by any single check:
 	// see WrongDecision.
@@ -112,7 +112,7 @@ type Config struct {
 	// correctly for a while and then diverges at a visible point.
 	CorruptFromGame int64
 
-	// Validator checks this replica's state root against the canonical chain
+	// Validator checks this replica's state checksum against the canonical chain
 	// after every applied event, including during replay. Nil disables the check.
 	Validator platform.StateValidator
 }
@@ -212,7 +212,7 @@ func (p *Player) Run(ctx context.Context) error { return p.eventloop.Run(ctx) }
 // player's own goroutine, or once its event loop has stopped.
 func (p *Player) GameStore() *fsm.GameStore { return p.gameStore }
 
-// StateHash is the chained state root as of the last event this replica applied.
+// StateHash is the chained state checksum as of the last event this replica applied.
 // Only safe once its event loop has stopped.
 func (p *Player) StateHash() uint64 { return p.gameStore.StateHash() }
 

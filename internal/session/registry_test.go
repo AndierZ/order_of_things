@@ -84,7 +84,7 @@ func TestRegistryReproducesASeed(t *testing.T) {
 		t.Error("two sessions were given the same id")
 	}
 	if secondResult.StateHash != firstResult.StateHash {
-		t.Errorf("replaying seed 1234 gave state root %016x, want %016x",
+		t.Errorf("replaying seed 1234 gave state checksum %016x, want %016x",
 			secondResult.StateHash, firstResult.StateHash)
 	}
 }
@@ -155,7 +155,7 @@ func TestRegistryGeneratesAReferenceForEverySession(t *testing.T) {
 	// And the live session reproduces it.
 	result := play(handle).Session.Wait()
 	if result.StateHash != recorded.StateHash {
-		t.Errorf("live session state root %016x, reference %016x", result.StateHash, recorded.StateHash)
+		t.Errorf("live session state checksum %016x, reference %016x", result.StateHash, recorded.StateHash)
 	}
 }
 
@@ -347,7 +347,7 @@ func TestRegistryRunsSessionsConcurrently(t *testing.T) {
 			t.Errorf("session %s completed %d of 25 games", handle.Id, result.Games)
 		}
 		if seen, ok := roots[handle.Seed]; ok && seen != result.StateHash {
-			t.Errorf("seed %d produced two different state roots: %016x and %016x",
+			t.Errorf("seed %d produced two different state checksums: %016x and %016x",
 				handle.Seed, seen, result.StateHash)
 		}
 		roots[handle.Seed] = result.StateHash

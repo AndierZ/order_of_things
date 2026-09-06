@@ -20,7 +20,7 @@ import (
 // the first point at which an emission will actually be transmitted.
 type EventloopHandler func(*Event) any
 
-// StateValidator checks a replica's state root against a reference while it
+// StateValidator checks a replica's state checksum against a reference while it
 // replays the log at boot. Returning an error refuses it rejoin.
 //
 // This is the second, independent quarantine path. The one built into the
@@ -51,14 +51,14 @@ type Eventloop struct {
 	stateRoot func() uint64
 	validator StateValidator
 	// replaying is true until the in-band activation marker arrives, which is
-	// exactly the window the state-root check applies to.
+	// exactly the window the state-checksum check applies to.
 	replaying bool
 }
 
 // Option configures an event loop at construction.
 type Option func(*Eventloop)
 
-// WithStateValidation checks the component's state root against a reference for
+// WithStateValidation checks the component's state checksum against a reference for
 // every event it replays at boot, and not afterwards. That is the point of it: a
 // restarting replica is refused rejoin before it can serve, rather than after it
 // has already answered something wrong.

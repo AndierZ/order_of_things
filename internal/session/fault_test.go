@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -544,4 +545,40 @@ func TestRepeatedBuggedRestartsNeverLetOneThrough(t *testing.T) {
 		}
 	}
 	s.Wait()
+}
+
+// Overlapping restarts do not race, and a rehearsal cannot reach the live
+// stream. The candidate is built against a sequencer of its own that is never
+// run and never subscribed to; it is driven by direct calls, so there is nothing
+// for it to leak into. Asserted on a paused session, where any growth in the live
+// log could only have come from a rehearsal escaping.
+func TestOverlappingRehearsalsCannotReachTheLiveStream(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	s := session.New(session.Config{
+		Seed: 42, Games: 25, Replicas: 2, Reference: reference(t, 42, 25), StartPaused: true,
+	})
+	s.Start(ctx)
+	before := len(s.Sequencer().EventLog())
+
+	var wg sync.WaitGroup
+	for i := 0; i < 24; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.RestartWithBug("flipper", "r1", session.Defect{WrongDecision: true})
+		}()
+	}
+	wg.Wait()
+
+	if after := len(s.Sequencer().EventLog()); after != before {
+		t.Errorf("rehearsals put %d events into the live stream", after-before)
+	}
+	if !status(t, s, "flipper", "r1").Quarantined {
+		t.Error("the bugged replica was let through")
+	}
+	if status(t, s, "flipper", "r0").Quarantined {
+		t.Error("the healthy partner was quarantined")
+	}
 }

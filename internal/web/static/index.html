@@ -13,7 +13,7 @@
   <p class="lede">A distributed system you are invited to break.</p>
   <div class="cast" id="cast"></div>
   <p>Four players, eleven components, everyone on its own goroutine. Kill a replica
-     mid&#8209;game. Restart it. Bring one back subtly corrupted. The tournament
+     mid&#8209;game. Restart it. Bring one back corrupted. The tournament
      still ends exactly the same way.</p>
   <p>That is not luck, and it is not about the fixed random seed. It is that every
      component is a state machine fed one ordered log, so they all build the same
@@ -22,13 +22,12 @@
   <button class="primary" id="play">Play</button>
 
   <p class="credit">
-    The game being played, its payoff matrix and the whole way of explaining it
-    are borrowed from
-    <a href="https://ncase.me/trust/" target="_blank" rel="noopener">Nicky
-    Case&rsquo;s <em>The Evolution of Trust</em></a>, which is worth exploring separately.
+    Inspired by <a href="https://ncase.me/trust/" target="_blank" rel="noopener">Nicky
+    Case&rsquo;s <em>The Evolution of Trust</em></a> and <a href="https://aeron.io/aeron-sequencer/"
+                                                            target="_blank" rel="noopener">Adaptive&rsquo;s <em>Aeron Sequencer</em></a>.
     <br>
     Music by Zian Xu, made with <a href="https://suno.com/s/yjNvZutbRTCvK0ko"
-    target="_blank" rel="noopener">Suno</a>.
+                                   target="_blank" rel="noopener">Suno</a>.
   </p>
 </section>
 
@@ -115,8 +114,11 @@
 
   <footer>
     Inspired by <a href="https://ncase.me/trust/" target="_blank" rel="noopener">Nicky
-    Case&rsquo;s <em>The Evolution of Trust</em></a>, which this borrows its
-    payoff matrix and its whole way of explaining things from.
+    Case&rsquo;s <em>The Evolution of Trust</em></a> and <a href="https://aeron.io/aeron-sequencer/"
+                                                            target="_blank" rel="noopener">Adaptive&rsquo;s <em>Aeron Sequencer</em></a>.
+    <br>
+    Music by Zian Xu, made with <a href="https://suno.com/s/yjNvZutbRTCvK0ko"
+                                   target="_blank" rel="noopener">Suno</a>.
   </footer>
 </main>
 

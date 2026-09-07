@@ -18,7 +18,7 @@ you to break it while it runs.
 
 ## The claim
 
-Kill a replica mid-game. Restart it. Bring one back subtly corrupted. **The
+Kill a replica mid-game. Restart it. Bring one back corrupted. **The
 tournament ends exactly the same way**, and the corrupted replica never gets back
 in.
 
@@ -395,8 +395,7 @@ Each is a scoping decision, argued in `deterministic-tournament-design-doc.md`.
 
 ---
 
-Inspired by [Nicky Case's *The Evolution of Trust*](https://ncase.me/trust/),
-which this borrows its payoff matrix and its whole way of explaining things from.
+Inspired by [Nicky Case's *The Evolution of Trust*](https://ncase.me/trust/) and [Adaptive's *Aeron Sequencer*](https://aeron.io/aeron-sequencer/)
 
 Music by Zian Xu, made with [Suno](https://suno.com/s/yjNvZutbRTCvK0ko) and
 embedded in the binary, so the demo has no runtime dependency on anything outside
